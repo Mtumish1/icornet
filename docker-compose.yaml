@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: postgres:17
+    container_name: hotspot-postgres
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_DB: hotspot_db
+      POSTGRES_USER: hotspot
+      POSTGRES_PASSWORD: password123
+
+    ports:
+      - "5432:5432"
+
+    volumes:
+      - hotspot_postgres_data:/var/lib/postgresql/data
+
+volumes:
+  hotspot_postgres_data:
