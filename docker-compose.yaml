@@ -1,19 +1,60 @@
 services:
   postgres:
-    image: postgres:17
+    image: postgres:17-alpine
     container_name: hotspot-postgres
     restart: unless-stopped
 
     environment:
-      POSTGRES_DB: hotspot_db
-      POSTGRES_USER: hotspot
-      POSTGRES_PASSWORD: password123
+      POSTGRES_DB: ${POSTGRES_DB:-hotspot_db}
+      POSTGRES_USER: ${POSTGRES_USER:-hotspot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
 
-    ports:
-      - "5432:5432"
-
+    # Auto-import schema on first start.
+    # schema.sql is idempotent (uses IF NOT EXISTS / ON CONFLICT DO NOTHING).
     volumes:
       - hotspot_postgres_data:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+
+    # Do NOT expose 5432 to the host on a VPS — keep DB internal to Docker network only.
+    # To connect locally for debugging: docker exec -it hotspot-postgres psql -U hotspot hotspot_db
+    expose:
+      - "5432"
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-hotspot} -d ${POSTGRES_DB:-hotspot_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+    networks:
+      - hotspot-internal
+
+  app:
+    build: .
+    container_name: hotspot-app
+    restart: unless-stopped
+
+    env_file:
+      - .env
+
+    # Override DATABASE_URL to use the Docker service name instead of localhost
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-hotspot}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-hotspot_db}
+
+    ports:
+      - "${PORT:-3000}:3000"
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    networks:
+      - hotspot-internal
+
+networks:
+  hotspot-internal:
+    driver: bridge
 
 volumes:
   hotspot_postgres_data:
