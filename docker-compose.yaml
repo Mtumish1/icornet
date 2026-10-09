@@ -15,10 +15,10 @@ services:
       - hotspot_postgres_data:/var/lib/postgresql/data
       - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
 
-    # Do NOT expose 5432 to the host on a VPS — keep DB internal to Docker network only.
-    # To connect locally for debugging: docker exec -it hotspot-postgres psql -U hotspot hotspot_db
-    expose:
-      - "5432"
+    # Mapped to 5434 on host so local Node app can reach it
+    # (5432 is taken by teipay_db on this machine)
+    ports:
+      - "5434:5432"
 
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-hotspot} -d ${POSTGRES_DB:-hotspot_db}"]

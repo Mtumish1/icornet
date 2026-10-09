@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Error - FastWiFi</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --primary-orange: #FF7A00;
+            --dark-orange: #E86A00;
+            --light-orange: #FFB366;
+            --light-black: #1A1A1A;
+            --dark-gray: #2D2D2D;
+            --medium-gray: #4A4A4A;
+            --light-gray: #F5F5F5;
+            --border-gray: #E0E0E0;
+            --success: #27AE60;
+            --error: #E74C3C;
+            --warning: #F39C12;
+            --info: #3498DB;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #FAFAFA 0%, #F0F0F0 100%);
+            color: var(--light-black);
+            line-height: 1.6;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* ============ HEADER ============ */
+        header {
+            background: white;
+            padding: 12px 0;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+        }
+
+        .header-container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 16px;
+            display: flex;
+            align-items: center;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 20px;
+            font-weight: 700;
+            text-decoration: none;
+            color: var(--light-black);
+        }
+
+        .logo-icon {
+            width: 36px;
+            height: 36px;
+            background: linear-gradient(135deg, var(--primary-orange), var(--dark-orange));
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 20px;
+        }
+
+        .logo-text {
+            background: linear-gradient(135deg, var(--primary-orange), var(--dark-orange));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        /* ============ CONTAINER ============ */
+        .container {
+            flex: 1;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 40px 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            width: 100%;
+        }
+
+        .error-content {
+            width: 100%;
+        }
+
+        .error-icon {
+            font-size: 80px;
+            margin-bottom: 20px;
+            display: inline-block;
+            animation: bounce 2s infinite;
+        }
+
+        @keyframes bounce {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-20px); }
+        }
+
+        .error-code {
+            font-size: 64px;
+            font-weight: 800;
+            margin-bottom: 10px;
+            background: linear-gradient(135deg, var(--primary-orange), var(--dark-orange));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .error-title {
+            font-size: 28px;
+            font-weight: 700;
+            margin-bottom: 12px;
+            color: var(--light-black);
+        }
+
+        .error-description {
+            font-size: 16px;
+            color: var(--medium-gray);
+            margin-bottom: 30px;
+            line-height: 1.6;
+        }
+
+        .error-box {
+            background: rgba(255, 122, 0, 0.05);
+            border-left: 4px solid var(--primary-orange);
+            padding: 16px;
+            border-radius: 10px;
+            margin-bottom: 30px;
+            text-align: left;
+            font-size: 14px;
+            color: var(--medium-gray);
+            line-height: 1.6;
+        }
+
+        .error-box strong {
+            color: var(--light-black);
+            display: block;
+            margin-bottom: 8px;
+        }
+
+        .error-details {
+            background: var(--light-gray);
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 30px;
+            text-align: left;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            color: var(--medium-gray);
+            overflow-x: auto;
+            word-break: break-all;
+        }
+
+        .actions {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+
+        .btn {
+            padding: 14px 24px;
+            border: none;
+            border-radius: 10px;
+            font-weight: 700;
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-decoration: none;
+            display: inline-block;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, var(--primary-orange), var(--dark-orange));
+            color: white;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(255, 122, 0, 0.3);
+        }
+
+        .btn-secondary {
+            background: white;
+            color: var(--light-black);
+            border: 2px solid var(--border-gray);
+        }
+
+        .btn-secondary:hover {
+            border-color: var(--primary-orange);
+            color: var(--primary-orange);
+        }
+
+        .help-text {
+            font-size: 12px;
+            color: var(--medium-gray);
+            margin-top: 20px;
+        }
+
+        .help-text a {
+            color: var(--primary-orange);
+            text-decoration: none;
+            font-weight: 600;
+        }
+
+        .help-text a:hover {
+            text-decoration: underline;
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                padding: 30px 16px;
+            }
+
+            .error-code {
+                font-size: 48px;
+            }
+
+            .error-title {
+                font-size: 24px;
+            }
+
+            .error-description {
+                font-size: 14px;
+            }
+
+            .actions {
+                flex-direction: column;
+            }
+
+            .btn {
+                width: 100%;
+            }
+        }
+
+        /* ============ FOOTER ============ */
+        footer {
+            background: var(--light-black);
+            color: white;
+            text-align: center;
+            padding: 20px;
+            font-size: 12px;
+            opacity: 0.7;
+        }
+    </style>
+</head>
+<body>
+    <!-- HEADER -->
+    <header>
+        <div class="header-container">
+            <a href="/landing.html" class="logo">
+                <div class="logo-icon">📡</div>
+                <div class="logo-text">FastWiFi</div>
+            </a>
+        </div>
+    </header>
+
+    <!-- ERROR CONTENT (Will be injected by JavaScript) -->
+    <div class="container">
+        <div class="error-content" id="errorContent">
+            <!-- Content loads here -->
+        </div>
+    </div>
+
+    <!-- FOOTER -->
+    <footer>
+        © 2024 FastWiFi. For support, email support@fastwifi.com or call +254 (0)700-000-000
+    </footer>
+
+    <script>
+        // Get error type from URL parameter
+        const urlParams = new URLSearchParams(window.location.search);
+        const errorType = urlParams.get('error') || '404';
+        const errorMessage = urlParams.get('message') || '';
+        const errorDetails = urlParams.get('details') || '';
+
+        const errors = {
+            // 404 - Page Not Found
+            '404': {
+                icon: '🔍',
+                code: '404',
+                title: 'Page Not Found',
+                description: 'The page you\'re looking for doesn\'t exist or has been moved.',
+                solution: 'Check the URL and try again.',
+                actions: [
+                    { text: 'Back to Home', href: '/landing.html', type: 'primary' },
+                    { text: 'Back to Portal', href: '/portal.html', type: 'secondary' }
+                ]
+            },
+
+            // 500 - Server Error
+            '500': {
+                icon: '⚙️',
+                code: '500',
+                title: 'Server Error',
+                description: 'Something went wrong on our end. Our team has been notified and is working to fix it.',
+                solution: 'Please try again in a few moments.',
+                actions: [
+                    { text: 'Try Again', href: 'javascript:location.reload()', type: 'primary' },
+                    { text: 'Back to Home', href: '/landing.html', type: 'secondary' }
+                ]
+            },
+
+            // 503 - Service Unavailable
+            '503': {
+                icon: '🚀',
+                code: '503',
+                title: 'Service Unavailable',
+                description: 'We\'re currently maintaining our system to improve your experience.',
+                solution: 'We\'ll be back online shortly. Please check back in a few minutes.',
+                actions: [
+                    { text: 'Try Again', href: 'javascript:location.reload()', type: 'primary' },
+                    { text: 'Back to Home', href: '/landing.html', type: 'secondary' }
+                ]
+            },
+
+            // 401 - Unauthorized / Session Expired
+            '401': {
+                icon: '🔐',
+                code: '401',
+                title: 'Session Expired',
+                description: 'Your session has expired for security reasons. Please log in again.',
+                solution: 'You\'ll be redirected to login momentarily.',
+                actions: [
+                    { text: 'Log In', href: '/landing.html', type: 'primary' },
+                    { text: 'Go Home', href: '/landing.html', type: 'secondary' }
+                ],
+                autoRedirect: true,
+                redirectTime: 3000,
+                redirectUrl: '/landing.html'
+            },
+
+            // Payment Failed
+            'payment-failed': {
+                icon: '❌',
+                code: 'Payment Failed',
+                title: 'Payment Could Not Be Processed',
+                description: 'Your payment was not successful. Your account has not been charged.',
+                solution: 'Please check your M-Pesa balance and try again, or contact support.',
+                actions: [
+                    { text: 'Try Again', href: '/landing.html', type: 'primary' },
+                    { text: 'Contact Support', href: 'tel:+254700000000', type: 'secondary' }
+                ]
+            },
+
+            // Insufficient Balance
+            'insufficient-balance': {
+                icon: '💰',
+                code: 'Balance Low',
+                title: 'Insufficient Balance',
+                description: 'Your account balance is not enough for this purchase.',
+                solution: 'Top up your account with M-Pesa and try again.',
+                actions: [
+                    { text: 'Top Up Account', href: '/portal.html', type: 'primary' },
+                    { text: 'Back', href: 'javascript:history.back()', type: 'secondary' }
+                ]
+            },
+
+            // Network Error
+            'network-error': {
+                icon: '📡',
+                code: 'No Connection',
+                title: 'Network Error',
+                description: 'Unable to connect to the internet. Please check your connection.',
+                solution: 'Make sure you have a stable internet connection and try again.',
+                actions: [
+                    { text: 'Try Again', href: 'javascript:location.reload()', type: 'primary' },
+                    { text: 'Back', href: 'javascript:history.back()', type: 'secondary' }
+                ]
+            },
+
+            // WiFi Connection Error
+            'wifi-error': {
+                icon: '📶',
+                code: 'WiFi Issue',
+                title: 'Can\'t Connect to WiFi',
+                description: 'There\'s an issue with your WiFi connection.',
+                solution: 'Try these steps:\n1. Move closer to the WiFi router\n2. Forget the network and reconnect\n3. Restart your phone\'s WiFi',
+                actions: [
+                    { text: 'Try Again', href: 'javascript:location.reload()', type: 'primary' },
+                    { text: 'Back to Portal', href: '/portal.html', type: 'secondary' }
+                ]
+            },
+
+            // M-Pesa Error
+            'mpesa-error': {
+                icon: '💳',
+                code: 'M-Pesa Issue',
+                title: 'M-Pesa Request Failed',
+                description: 'We couldn\'t send the M-Pesa prompt to your phone.',
+                solution: 'Check your phone number is correct and try again. If the issue persists, contact support.',
+                actions: [
+                    { text: 'Try Again', href: 'javascript:history.back()', type: 'primary' },
+                    { text: 'Contact Support', href: 'tel:+254700000000', type: 'secondary' }
+                ]
+            },
+
+            // Access Denied
+            'access-denied': {
+                icon: '🚫',
+                code: '403',
+                title: 'Access Denied',
+                description: 'You don\'t have permission to access this resource.',
+                solution: 'If you believe this is an error, please contact support.',
+                actions: [
+                    { text: 'Back to Home', href: '/landing.html', type: 'primary' },
+                    { text: 'Contact Support', href: 'tel:+254700000000', type: 'secondary' }
+                ]
+            },
+
+            // Database Error
+            'database-error': {
+                icon: '🗄️',
+                code: 'Database Error',
+                title: 'Data Error',
+                description: 'We encountered an issue accessing our database.',
+                solution: 'Please try again in a moment. If the problem continues, contact support.',
+                actions: [
+                    { text: 'Try Again', href: 'javascript:location.reload()', type: 'primary' },
+                    { text: 'Contact Support', href: 'tel:+254700000000', type: 'secondary' }
+                ]
+            }
+        };
+
+        // Get error configuration
+        const config = errors[errorType] || errors['404'];
+
+        // Render error page
+        function renderErrorPage() {
+            const content = document.getElementById('errorContent');
+            
+            let html = `
+                <div class="error-icon">${config.icon}</div>
+                <div class="error-code">${config.code}</div>
+                <h1 class="error-title">${config.title}</h1>
+                <p class="error-description">${config.description}</p>
+            `;
+
+            if (config.solution) {
+                html += `
+                    <div class="error-box">
+                        <strong>What to do:</strong>
+                        ${config.solution}
+                    </div>
+                `;
+            }
+
+            if (errorDetails) {
+                html += `
+                    <div class="error-details">
+                        Details: ${errorDetails}
+                    </div>
+                `;
+            }
+
+            html += '<div class="actions">';
+            config.actions.forEach(action => {
+                html += `<a href="${action.href}" class="btn btn-${action.type}">${action.text}</a>`;
+            });
+            html += '</div>';
+
+            html += `
+                <div class="help-text">
+                    Need help? <a href="tel:+254700000000">Call Support</a> or email <a href="mailto:support@fastwifi.com">support@fastwifi.com</a>
+                </div>
+            `;
+
+            content.innerHTML = html;
+        }
+
+        // Auto redirect if configured
+        function handleAutoRedirect() {
+            if (config.autoRedirect) {
+                setTimeout(() => {
+                    window.location.href = config.redirectUrl;
+                }, config.redirectTime);
+            }
+        }
+
+        // Initialize on page load
+        document.addEventListener('DOMContentLoaded', () => {
+            renderErrorPage();
+            handleAutoRedirect();
+        });
+
+        // Handle network errors
+        window.addEventListener('offline', () => {
+            if (!errorType) {
+                window.location.href = '/error.html?error=network-error';
+            }
+        });
+    </script>
+</body>
+</html>

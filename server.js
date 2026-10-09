@@ -542,9 +542,77 @@ app.post('/mpesa/callback', async (req, res) => {
         } catch (dbErr) {
             await client.query('ROLLBACK');
             console.error('❌ DB error crediting balance, rolled back:', dbErr.message);
-        } finally {
             client.release();
+            return;
         }
+
+        // Auto-provision WiFi if this payment was for a specific package (portal flow)
+        if (transaction.package_id) {
+            try {
+                const pkgResult = await pool.query(
+                    'SELECT * FROM pricing WHERE id = $1',
+                    [transaction.package_id]
+                );
+
+                if (pkgResult.rows.length > 0) {
+                    const pkg = pkgResult.rows[0];
+                    const username = `wf_${userId}_${Date.now()}`.substring(0, 20);
+                    const password = uuidv4().substring(0, 12);
+                    const sessionKey = uuidv4().substring(0, 16);
+
+                    const provClient = await pool.connect();
+                    try {
+                        await provClient.query('BEGIN');
+
+                        // Deduct balance (atomic guard)
+                        const deduct = await provClient.query(
+                            `UPDATE users SET account_balance = account_balance - $1
+                             WHERE id = $2 AND account_balance >= $1
+                             RETURNING account_balance`,
+                            [pkg.price, userId]
+                        );
+
+                        if (deduct.rowCount === 0) {
+                            await provClient.query('ROLLBACK');
+                            console.warn(`⚠️ Insufficient balance to auto-provision for user ${userId}`);
+                        } else {
+                            // Create session
+                            await provClient.query(
+                                `INSERT INTO sessions
+                                   (user_id, session_key, mikrotik_username, mikrotik_password, start_time, duration_hours, cost_amount, status)
+                                 VALUES ($1, $2, $3, $4, NOW(), $5, $6, 'active')`,
+                                [userId, sessionKey, username, password, pkg.hours, pkg.price]
+                            );
+
+                            // Link session back to transaction for status polling
+                            await provClient.query(
+                                `UPDATE transactions SET provisioned_session_key = $1 WHERE id = $2`,
+                                [sessionKey, transaction.id]
+                            );
+
+                            await provClient.query('COMMIT');
+                            console.log(`✅ Auto-provisioned WiFi: user ${userId}, ${pkg.hours}h`);
+
+                            // Add Mikrotik user outside DB transaction
+                            try {
+                                await mikrotik.addUser(username, password);
+                            } catch (sshErr) {
+                                console.error(`❌ Mikrotik SSH failed for auto-provision ${username}:`, sshErr.message);
+                            }
+                        }
+                    } catch (provErr) {
+                        await provClient.query('ROLLBACK');
+                        console.error('❌ Auto-provision DB error:', provErr.message);
+                    } finally {
+                        provClient.release();
+                    }
+                }
+            } catch (provErr) {
+                console.error('❌ Auto-provision error:', provErr.message);
+            }
+        }
+
+        client.release();
 
     } catch (error) {
         console.error('❌ Callback processing error:', error);
@@ -631,10 +699,10 @@ app.post('/api/wifi/buy', authMiddleware, async (req, res) => {
         // Record session
         const sessionResult = await client.query(
             `INSERT INTO sessions
-               (user_id, session_key, mikrotik_username, start_time, duration_hours, cost_amount, status)
-             VALUES ($1, $2, $3, NOW(), $4, $5, 'active')
+               (user_id, session_key, mikrotik_username, mikrotik_password, start_time, duration_hours, cost_amount, status)
+             VALUES ($1, $2, $3, $4, NOW(), $5, $6, 'active')
              RETURNING *`,
-            [req.userId, sessionKey, username, pkg.hours, pkg.price]
+            [req.userId, sessionKey, username, password, pkg.hours, pkg.price]
         );
 
         await client.query('COMMIT');
@@ -733,6 +801,165 @@ app.get('/api/transactions/history', authMiddleware, async (req, res) => {
     } catch (error) {
         console.error('❌ Transaction Error:', error);
         return sendError(res, 500, 'Server error', error);
+    }
+});
+
+// ============ PUBLIC PORTAL ROUTES (no auth required) ============
+
+/**
+ * POST /api/portal/pay
+ * One-step public endpoint for the captive portal.
+ * Registers (or logs in) the customer by phone number and immediately
+ * triggers an STK Push for the selected package.
+ * No JWT token required — customers don't need accounts.
+ *
+ * Body: { phone_number, package_id }
+ */
+app.post('/api/portal/pay', paymentLimiter, async (req, res) => {
+    const { phone_number, package_id } = req.body;
+
+    if (!phone_number || !isValidPhone(phone_number)) {
+        return sendError(res, 400, 'Invalid phone number. Format: 2547XXXXXXXX (e.g. 254712345678)');
+    }
+
+    if (!package_id) {
+        return sendError(res, 400, 'Please select a package');
+    }
+
+    try {
+        // Fetch the package (server owns the price — never trust the client)
+        const pkgResult = await pool.query(
+            'SELECT * FROM pricing WHERE id = $1',
+            [package_id]
+        );
+
+        if (pkgResult.rows.length === 0) {
+            return sendError(res, 404, 'Package not found');
+        }
+
+        const pkg = pkgResult.rows[0];
+
+        // Register or find user — fully transparent to the customer
+        const userResult = await pool.query(
+            `INSERT INTO users (phone_number)
+             VALUES ($1)
+             ON CONFLICT (phone_number) DO UPDATE SET phone_number = EXCLUDED.phone_number
+             RETURNING id`,
+            [phone_number]
+        );
+        const userId = userResult.rows[0].id;
+
+        // Create a pending transaction that remembers the intended package
+        const internalRef = uuidv4();
+        await pool.query(
+            `INSERT INTO transactions (user_id, mpesa_ref, amount, status, package_id)
+             VALUES ($1, $2, $3, 'pending', $4)`,
+            [userId, internalRef, pkg.price, pkg.id]
+        );
+
+        // Trigger STK Push
+        const stkResponse = await mpesaService.stkPush(
+            phone_number,
+            pkg.price,
+            `WIFI-${internalRef.substring(0, 12)}`
+        );
+
+        if (stkResponse.ResponseCode !== '0') {
+            return res.status(400).json({
+                error: 'Could not send payment request',
+                details: stkResponse.ResponseDescription
+            });
+        }
+
+        // Store CheckoutRequestID for callback matching
+        await pool.query(
+            `UPDATE transactions SET checkout_request_id = $1 WHERE mpesa_ref = $2`,
+            [stkResponse.CheckoutRequestID, internalRef]
+        );
+
+        console.log(`📱 Portal pay: ${phone_number} → ${pkg.description} (KES ${pkg.price})`);
+
+        res.json({
+            success: true,
+            checkout_request_id: stkResponse.CheckoutRequestID,
+            package: {
+                description: pkg.description,
+                hours: pkg.hours,
+                price: pkg.price
+            },
+            message: `Payment request sent to ${phone_number}. Enter your M-Pesa PIN.`
+        });
+
+    } catch (error) {
+        console.error('❌ Portal Pay Error:', error);
+        return sendError(res, 500, 'Payment request failed. Please try again.', error);
+    }
+});
+
+/**
+ * GET /api/portal/status/:checkoutRequestId
+ * Polling endpoint for the captive portal.
+ * Returns the payment status and WiFi credentials once the payment is confirmed.
+ * No auth required — the checkout_request_id acts as a one-time token.
+ */
+app.get('/api/portal/status/:checkoutRequestId', async (req, res) => {
+    const { checkoutRequestId } = req.params;
+
+    if (!checkoutRequestId || checkoutRequestId.length < 10) {
+        return sendError(res, 400, 'Invalid checkout ID');
+    }
+
+    try {
+        const result = await pool.query(
+            `SELECT
+                t.status,
+                t.amount,
+                t.provisioned_session_key,
+                s.mikrotik_username  AS username,
+                s.mikrotik_password  AS password,
+                s.duration_hours,
+                s.start_time + (s.duration_hours * interval '1 hour') AS expiry,
+                p.description        AS package_name
+             FROM transactions t
+             LEFT JOIN sessions s ON s.session_key = t.provisioned_session_key
+             LEFT JOIN pricing p ON p.id = t.package_id
+             WHERE t.checkout_request_id = $1`,
+            [checkoutRequestId]
+        );
+
+        if (result.rows.length === 0) {
+            return sendError(res, 404, 'Transaction not found');
+        }
+
+        const tx = result.rows[0];
+
+        if (tx.status === 'pending') {
+            return res.json({ status: 'pending', message: 'Waiting for payment confirmation...' });
+        }
+
+        if (tx.status === 'failed') {
+            return res.json({ status: 'failed', message: 'Payment was cancelled or failed. Please try again.' });
+        }
+
+        if (tx.status === 'success' && tx.username) {
+            return res.json({
+                status: 'success',
+                credentials: {
+                    username: tx.username,
+                    password: tx.password,
+                    duration_hours: tx.duration_hours,
+                    expiry: tx.expiry,
+                    package_name: tx.package_name
+                }
+            });
+        }
+
+        // Payment succeeded but provisioning still in progress
+        return res.json({ status: 'provisioning', message: 'Payment received! Setting up your access...' });
+
+    } catch (error) {
+        console.error('❌ Portal Status Error:', error);
+        return sendError(res, 500, 'Could not check status', error);
     }
 });
 

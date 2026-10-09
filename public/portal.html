@@ -1,0 +1,949 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FastWiFi - My Account</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        :root {
+            --primary-orange: #FF7A00;
+            --dark-orange: #E86A00;
+            --light-orange: #FFB366;
+            --light-black: #1A1A1A;
+            --dark-gray: #2D2D2D;
+            --medium-gray: #4A4A4A;
+            --light-gray: #F5F5F5;
+            --border-gray: #E0E0E0;
+            --success: #27AE60;
+            --error: #E74C3C;
+            --warning: #F39C12;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #FAFAFA 0%, #F0F0F0 100%);
+            color: var(--light-black);
+            line-height: 1.6;
+        }
+
+        /* ============ HEADER ============ */
+        header {
+            background: white;
+            padding: 15px 0;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .header-container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-size: 20px;
+            font-weight: 700;
+        }
+
+        .logo-icon {
+            width: 36px;
+            height: 36px;
+            background: linear-gradient(135deg, var(--primary-orange), var(--dark-orange));
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-size: 18px;
+        }
+
+        .logo-text {
+            background: linear-gradient(135deg, var(--primary-orange), var(--dark-orange));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .header-actions {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .user-info {
+            text-align: right;
+            font-size: 13px;
+        }
+
+        .user-name {
+            font-weight: 600;
+            color: var(--light-black);
+        }
+
+        .user-phone {
+            color: var(--medium-gray);
+        }
+
+        .logout-btn {
+            background: linear-gradient(135deg, var(--primary-orange), var(--dark-orange));
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 8px;
+            font-weight: 600;
+            cursor: pointer;
+            font-size: 13px;
+            transition: all 0.3s ease;
+        }
+
+        .logout-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(255, 122, 0, 0.3);
+        }
+
+        /* ============ CONTAINER ============ */
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 40px 20px;
+        }
+
+        /* ============ WELCOME SECTION ============ */
+        .welcome-card {
+            background: linear-gradient(135deg, var(--primary-orange), var(--dark-orange));
+            color: white;
+            border-radius: 16px;
+            padding: 40px;
+            margin-bottom: 40px;
+            box-shadow: 0 10px 30px rgba(255, 122, 0, 0.2);
+        }
+
+        .welcome-card h1 {
+            font-size: 32px;
+            margin-bottom: 10px;
+            font-weight: 800;
+        }
+
+        .welcome-card p {
+            font-size: 16px;
+            opacity: 0.95;
+            margin-bottom: 20px;
+        }
+
+        .welcome-stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 20px;
+            margin-top: 30px;
+        }
+
+        .stat-item {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 15px;
+            border-radius: 12px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            text-align: center;
+            backdrop-filter: blur(10px);
+        }
+
+        .stat-label {
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            opacity: 0.8;
+            margin-bottom: 8px;
+        }
+
+        .stat-value {
+            font-size: 24px;
+            font-weight: 800;
+        }
+
+        @media (max-width: 768px) {
+            .welcome-card {
+                padding: 25px;
+            }
+            .welcome-card h1 {
+                font-size: 24px;
+            }
+        }
+
+        /* ============ MAIN GRID ============ */
+        .main-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 30px;
+            margin-bottom: 40px;
+        }
+
+        /* ============ CARD STYLES ============ */
+        .card {
+            background: white;
+            border-radius: 16px;
+            padding: 30px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06);
+            transition: all 0.3s ease;
+        }
+
+        .card:hover {
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+            transform: translateY(-2px);
+        }
+
+        .card-title {
+            font-size: 18px;
+            font-weight: 700;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            color: var(--light-black);
+        }
+
+        /* ============ ACCOUNT BALANCE ============ */
+        .balance-display {
+            text-align: center;
+            padding: 20px 0;
+        }
+
+        .balance-label {
+            font-size: 13px;
+            color: var(--medium-gray);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 10px;
+        }
+
+        .balance-amount {
+            font-size: 42px;
+            font-weight: 800;
+            background: linear-gradient(135deg, var(--primary-orange), var(--dark-orange));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+            margin-bottom: 20px;
+        }
+
+        .balance-buttons {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }
+
+        .btn {
+            padding: 12px 16px;
+            border: none;
+            border-radius: 10px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            font-size: 13px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, var(--primary-orange), var(--dark-orange));
+            color: white;
+            grid-column: span 2;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(255, 122, 0, 0.3);
+        }
+
+        .btn-secondary {
+            background: var(--light-gray);
+            color: var(--light-black);
+            border: 2px solid var(--border-gray);
+        }
+
+        .btn-secondary:hover {
+            border-color: var(--primary-orange);
+            color: var(--primary-orange);
+        }
+
+        /* ============ ACTIVE SESSIONS ============ */
+        .sessions-list {
+            display: grid;
+            gap: 12px;
+        }
+
+        .session-item {
+            background: linear-gradient(135deg, rgba(255, 122, 0, 0.05), rgba(255, 179, 102, 0.05));
+            border: 2px solid var(--light-orange);
+            border-radius: 12px;
+            padding: 16px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .session-info h4 {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--light-black);
+            margin-bottom: 6px;
+        }
+
+        .session-info p {
+            font-size: 12px;
+            color: var(--medium-gray);
+            margin-bottom: 4px;
+        }
+
+        .session-badge {
+            background: linear-gradient(135deg, var(--primary-orange), var(--dark-orange));
+            color: white;
+            padding: 6px 12px;
+            border-radius: 8px;
+            font-size: 12px;
+            font-weight: 600;
+            text-align: center;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 30px 20px;
+            color: var(--medium-gray);
+        }
+
+        .empty-state-icon {
+            font-size: 36px;
+            margin-bottom: 10px;
+            opacity: 0.5;
+        }
+
+        .empty-state-text {
+            font-size: 13px;
+        }
+
+        /* ============ PACKAGES SECTION ============ */
+        .packages-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+            gap: 12px;
+        }
+
+        .package-option {
+            background: white;
+            border: 2px solid var(--border-gray);
+            border-radius: 12px;
+            padding: 12px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .package-option:hover {
+            border-color: var(--primary-orange);
+            background: rgba(255, 122, 0, 0.02);
+        }
+
+        .package-option.selected {
+            border-color: var(--primary-orange);
+            background: linear-gradient(135deg, rgba(255, 122, 0, 0.1), rgba(255, 179, 102, 0.05));
+        }
+
+        .package-duration {
+            font-size: 20px;
+            font-weight: 800;
+            color: var(--primary-orange);
+            margin-bottom: 4px;
+        }
+
+        .package-price {
+            font-size: 14px;
+            font-weight: 700;
+            color: var(--light-black);
+            margin-bottom: 4px;
+        }
+
+        .package-period {
+            font-size: 11px;
+            color: var(--medium-gray);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        /* ============ TRANSACTION HISTORY ============ */
+        .transaction-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+
+        .transaction-table th {
+            text-align: left;
+            padding: 12px;
+            border-bottom: 2px solid var(--border-gray);
+            font-weight: 600;
+            color: var(--medium-gray);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .transaction-table td {
+            padding: 12px;
+            border-bottom: 1px solid var(--border-gray);
+        }
+
+        .transaction-table tr:last-child td {
+            border-bottom: none;
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 6px;
+            font-weight: 600;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .status-success {
+            background: rgba(39, 174, 96, 0.1);
+            color: var(--success);
+        }
+
+        .status-pending {
+            background: rgba(243, 156, 18, 0.1);
+            color: var(--warning);
+        }
+
+        .amount {
+            font-weight: 700;
+            color: var(--primary-orange);
+        }
+
+        /* ============ STATUS MESSAGES ============ */
+        .alert {
+            padding: 16px;
+            border-radius: 12px;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .alert.success {
+            background: rgba(39, 174, 96, 0.1);
+            border-left: 4px solid var(--success);
+            color: var(--success);
+        }
+
+        .alert.error {
+            background: rgba(231, 76, 60, 0.1);
+            border-left: 4px solid var(--error);
+            color: var(--error);
+        }
+
+        .alert.info {
+            background: rgba(255, 122, 0, 0.1);
+            border-left: 4px solid var(--primary-orange);
+            color: var(--primary-orange);
+        }
+
+        /* ============ MODAL ============ */
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.6);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .modal.active {
+            display: flex;
+        }
+
+        .modal-content {
+            background: white;
+            border-radius: 16px;
+            padding: 40px;
+            max-width: 500px;
+            width: 100%;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+
+        .modal-close {
+            float: right;
+            font-size: 28px;
+            font-weight: 300;
+            cursor: pointer;
+            color: var(--medium-gray);
+            border: none;
+            background: none;
+            padding: 0;
+            margin-top: -5px;
+        }
+
+        .modal-close:hover {
+            color: var(--light-black);
+        }
+
+        .modal-title {
+            font-size: 24px;
+            font-weight: 700;
+            margin-bottom: 20px;
+            margin-top: 10px;
+            color: var(--light-black);
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            font-size: 13px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--light-black);
+        }
+
+        .form-group input {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid var(--border-gray);
+            border-radius: 10px;
+            font-size: 14px;
+            transition: all 0.3s ease;
+        }
+
+        .form-group input:focus {
+            outline: none;
+            border-color: var(--primary-orange);
+            box-shadow: 0 0 0 4px rgba(255, 122, 0, 0.1);
+        }
+
+        /* ============ FOOTER ============ */
+        footer {
+            background: var(--light-black);
+            color: white;
+            text-align: center;
+            padding: 30px 20px;
+            margin-top: 60px;
+            font-size: 12px;
+            opacity: 0.8;
+        }
+
+        @media (max-width: 768px) {
+            .main-grid {
+                grid-template-columns: 1fr;
+            }
+            .welcome-stats {
+                grid-template-columns: repeat(2, 1fr);
+            }
+            .container {
+                padding: 20px 15px;
+            }
+            .modal-content {
+                padding: 25px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <!-- HEADER -->
+    <header>
+        <div class="header-container">
+            <div class="logo">
+                <div class="logo-icon">📡</div>
+                <div class="logo-text">FastWiFi</div>
+            </div>
+            <div class="header-actions">
+                <div class="user-info">
+                    <div class="user-name" id="userPhone">Loading...</div>
+                    <div class="user-phone" id="userStatus">Active</div>
+                </div>
+                <button class="logout-btn" onclick="logout()">Logout</button>
+            </div>
+        </div>
+    </header>
+
+    <!-- MAIN CONTENT -->
+    <div class="container">
+        <!-- ALERTS -->
+        <div id="alertContainer"></div>
+
+        <!-- WELCOME SECTION -->
+        <div class="welcome-card">
+            <h1>Welcome to FastWiFi! 🎉</h1>
+            <p>You're all set to enjoy fast and reliable internet access. Choose a package to get started or manage your account below.</p>
+            <div class="welcome-stats">
+                <div class="stat-item">
+                    <div class="stat-label">Account Balance</div>
+                    <div class="stat-value" id="statBalance">KES 0</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-label">Active Sessions</div>
+                    <div class="stat-value" id="statSessions">0</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-label">Total Used</div>
+                    <div class="stat-value" id="statUsed">0h</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- MAIN GRID -->
+        <div class="main-grid">
+            <!-- ACCOUNT BALANCE CARD -->
+            <div class="card">
+                <div class="card-title">💰 Account Balance</div>
+                <div class="balance-display">
+                    <div class="balance-label">Current Balance</div>
+                    <div class="balance-amount" id="balanceAmount">KES 0</div>
+                    <div class="balance-buttons">
+                        <button class="btn btn-primary" onclick="openTopupModal()">💳 Top Up Balance</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- BUY PACKAGE CARD -->
+            <div class="card">
+                <div class="card-title">🎁 Get WiFi Access</div>
+                <div class="packages-grid" id="packagesContainer">
+                    <!-- Packages will be loaded here -->
+                </div>
+                <button class="btn btn-primary" style="margin-top: 20px; width: 100%;" onclick="buySelectedPackage()">
+                    Buy Selected Package
+                </button>
+            </div>
+
+            <!-- ACTIVE SESSIONS CARD -->
+            <div class="card">
+                <div class="card-title">🌐 Active Sessions</div>
+                <div class="sessions-list" id="activeSessionsList">
+                    <div class="empty-state">
+                        <div class="empty-state-icon">✨</div>
+                        <div class="empty-state-text">No active sessions yet</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- TRANSACTION HISTORY -->
+        <div class="card">
+            <div class="card-title">📊 Transaction History</div>
+            <div style="overflow-x: auto;">
+                <table class="transaction-table">
+                    <thead>
+                        <tr>
+                            <th>Date</th>
+                            <th>Type</th>
+                            <th>Amount</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody id="transactionHistory">
+                        <tr>
+                            <td colspan="4" style="text-align: center; padding: 30px;">Loading transactions...</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- TOP-UP MODAL -->
+    <div class="modal" id="topupModal">
+        <div class="modal-content">
+            <button class="modal-close" onclick="closeTopupModal()">&times;</button>
+            <div class="modal-title">💳 Top Up Account</div>
+            <form id="topupForm" onsubmit="submitTopup(event)">
+                <div class="form-group">
+                    <label>Select Amount</label>
+                    <div class="packages-grid">
+                        <div class="package-option" onclick="selectTopupAmount(100, this)">
+                            <div class="package-duration">KES 100</div>
+                        </div>
+                        <div class="package-option" onclick="selectTopupAmount(500, this)">
+                            <div class="package-duration">KES 500</div>
+                        </div>
+                        <div class="package-option" onclick="selectTopupAmount(1000, this)">
+                            <div class="package-duration">KES 1000</div>
+                        </div>
+                        <div class="package-option" onclick="selectTopupAmount(5000, this)">
+                            <div class="package-duration">KES 5000</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="customAmount">Or Enter Custom Amount (KES)</label>
+                    <input type="number" id="customAmount" placeholder="Minimum 50" min="50" step="10">
+                </div>
+                <div class="form-group">
+                    <label for="topupPhone">Phone Number</label>
+                    <input type="tel" id="topupPhone" placeholder="254712345678" required>
+                </div>
+                <button type="submit" class="btn btn-primary" style="width: 100%; margin-top: 20px;">
+                    Send M-Pesa Prompt
+                </button>
+            </form>
+        </div>
+    </div>
+
+    <!-- FOOTER -->
+    <footer>
+        <p>© 2024 FastWiFi. All rights reserved. | <a href="#" style="color: inherit; text-decoration: underline;">Privacy</a> | <a href="#" style="color: inherit; text-decoration: underline;">Support</a></p>
+    </footer>
+
+    <script>
+        const API_BASE = 'http://localhost:3000/api';
+        let authToken = localStorage.getItem('authToken');
+        let currentUser = null;
+        let selectedTopupAmount = null;
+        let selectedPackage = null;
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            if (!authToken) {
+                window.location.href = '/landing.html';
+                return;
+            }
+            loadAccount();
+            loadPackages();
+            loadActiveSessions();
+            loadTransactionHistory();
+        });
+
+        async function loadAccount() {
+            try {
+                const response = await fetch(`${API_BASE}/user/account`, {
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+                currentUser = await response.json();
+                updateUI();
+            } catch (error) {
+                console.error('Error loading account:', error);
+                showAlert('Failed to load account info', 'error');
+            }
+        }
+
+        function updateUI() {
+            document.getElementById('userPhone').textContent = currentUser.phone_number;
+            document.getElementById('balanceAmount').textContent = `KES ${currentUser.account_balance.toFixed(2)}`;
+            document.getElementById('statBalance').textContent = `KES ${currentUser.account_balance.toFixed(2)}`;
+            document.getElementById('topupPhone').value = currentUser.phone_number;
+        }
+
+        async function loadPackages() {
+            try {
+                const response = await fetch(`${API_BASE}/pricing`);
+                const packages = await response.json();
+                const container = document.getElementById('packagesContainer');
+                container.innerHTML = packages.map(pkg => `
+                    <div class="package-option" onclick="selectPackage(${pkg.id}, ${pkg.price}, ${pkg.hours}, this)">
+                        <div class="package-duration">${pkg.hours}h</div>
+                        <div class="package-price">KES ${pkg.price}</div>
+                        <div class="package-period">${pkg.description}</div>
+                    </div>
+                `).join('');
+            } catch (error) {
+                console.error('Error loading packages:', error);
+            }
+        }
+
+        function selectPackage(id, price, hours, element) {
+            document.querySelectorAll('.package-option').forEach(el => el.classList.remove('selected'));
+            element.classList.add('selected');
+            selectedPackage = { id, price, hours };
+        }
+
+        async function buySelectedPackage() {
+            if (!selectedPackage) {
+                showAlert('Please select a package', 'error');
+                return;
+            }
+
+            if (currentUser.account_balance < selectedPackage.price) {
+                showAlert(`Insufficient balance. Need KES ${selectedPackage.price}, you have KES ${currentUser.account_balance}`, 'error');
+                return;
+            }
+
+            try {
+                const response = await fetch(`${API_BASE}/wifi/buy`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${authToken}`
+                    },
+                    body: JSON.stringify({ package_id: selectedPackage.id })
+                });
+
+                const data = await response.json();
+                if (data.success) {
+                    showAlert(`✅ WiFi Access Granted for ${selectedPackage.hours}h!\n\nUsername: ${data.username}\nPassword: ${data.password}\n\nConnect to the WiFi and enter these credentials.`, 'success');
+                    await loadAccount();
+                    await loadActiveSessions();
+                } else {
+                    showAlert(`Error: ${data.error}`, 'error');
+                }
+            } catch (error) {
+                console.error('Error buying package:', error);
+                showAlert('Failed to purchase package', 'error');
+            }
+        }
+
+        async function loadActiveSessions() {
+            try {
+                const response = await fetch(`${API_BASE}/sessions/active`, {
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+                const sessions = await response.json();
+                const container = document.getElementById('activeSessionsList');
+
+                if (sessions.length === 0) {
+                    container.innerHTML = `
+                        <div class="empty-state">
+                            <div class="empty-state-icon">✨</div>
+                            <div class="empty-state-text">No active sessions. Buy a package to get started!</div>
+                        </div>
+                    `;
+                } else {
+                    container.innerHTML = sessions.map(session => `
+                        <div class="session-item">
+                            <div class="session-info">
+                                <h4>WiFi Session</h4>
+                                <p>Duration: ${session.duration_hours} hour(s)</p>
+                                <p>Started: ${new Date(session.start_time).toLocaleString()}</p>
+                            </div>
+                            <div class="session-badge">🟢 Active</div>
+                        </div>
+                    `).join('');
+                }
+
+                document.getElementById('statSessions').textContent = sessions.length;
+            } catch (error) {
+                console.error('Error loading sessions:', error);
+            }
+        }
+
+        async function loadTransactionHistory() {
+            try {
+                const response = await fetch(`${API_BASE}/transactions/history`, {
+                    headers: { 'Authorization': `Bearer ${authToken}` }
+                });
+                const transactions = await response.json();
+                const tbody = document.getElementById('transactionHistory');
+
+                if (transactions.length === 0) {
+                    tbody.innerHTML = `<tr><td colspan="4" style="text-align: center; padding: 30px;">No transactions yet</td></tr>`;
+                } else {
+                    tbody.innerHTML = transactions.map(tx => `
+                        <tr>
+                            <td>${new Date(tx.created_at).toLocaleDateString()}</td>
+                            <td>${tx.status === 'success' ? 'Payment' : 'Pending'}</td>
+                            <td class="amount">+KES ${parseFloat(tx.amount).toFixed(2)}</td>
+                            <td><span class="status-badge status-${tx.status === 'success' ? 'success' : 'pending'}">${tx.status}</span></td>
+                        </tr>
+                    `).join('');
+                }
+            } catch (error) {
+                console.error('Error loading transactions:', error);
+            }
+        }
+
+        function openTopupModal() {
+            document.getElementById('topupModal').classList.add('active');
+        }
+
+        function closeTopupModal() {
+            document.getElementById('topupModal').classList.remove('active');
+        }
+
+        function selectTopupAmount(amount, element) {
+            document.querySelectorAll('.package-option').forEach(el => el.classList.remove('selected'));
+            element.classList.add('selected');
+            selectedTopupAmount = amount;
+            document.getElementById('customAmount').value = '';
+        }
+
+        async function submitTopup(event) {
+            event.preventDefault();
+
+            const amount = selectedTopupAmount || parseInt(document.getElementById('customAmount').value);
+            const phone = document.getElementById('topupPhone').value;
+
+            if (!amount || amount < 50) {
+                showAlert('Enter amount minimum KES 50', 'error');
+                return;
+            }
+
+            try {
+                const response = await fetch(`${API_BASE}/payment/initiate`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${authToken}`
+                    },
+                    body: JSON.stringify({ phone_number: phone, amount })
+                });
+
+                const data = await response.json();
+                if (data.success) {
+                    showAlert(`✅ M-Pesa prompt sent to ${phone}. Check your phone to enter PIN.`, 'success');
+                    closeTopupModal();
+                    setTimeout(() => {
+                        loadAccount();
+                    }, 3000);
+                } else {
+                    showAlert(`Error: ${data.error}`, 'error');
+                }
+            } catch (error) {
+                showAlert('Failed to initiate payment', 'error');
+            }
+        }
+
+        function showAlert(message, type = 'info') {
+            const container = document.getElementById('alertContainer');
+            const alert = document.createElement('div');
+            alert.className = `alert ${type}`;
+            alert.textContent = message;
+            container.appendChild(alert);
+
+            setTimeout(() => alert.remove(), 5000);
+        }
+
+        function logout() {
+            localStorage.removeItem('authToken');
+            window.location.href = '/landing.html';
+        }
+
+        // Close modal on background click
+        document.getElementById('topupModal').addEventListener('click', (e) => {
+            if (e.target.id === 'topupModal') {
+                closeTopupModal();
+            }
+        });
+    </script>
+</body>
+</html>
