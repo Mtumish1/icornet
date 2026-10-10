@@ -1,26 +1,16 @@
 /*
  * FastWiFi admin dashboard
  *
- * API integration contract (adapt these paths to your backend):
- *   GET /api/admin/overview  -> { connected_count, today_revenue, month_revenue,
- *       successful_payments, monthly_payments, success_rate, daily_change,
- *       revenue_series: [{ label, amount }], packages: [{ name, sales, revenue }] }
- *   GET /api/admin/sessions  -> { sessions: [{ id, phone, name, device, ip,
- *       package_name, connected_since, remaining, status }] }
- *   GET /api/admin/payments  -> { payments: [{ id, reference, phone, name,
- *       package_name, created_at, amount, status }] }
- *
- * These are suggested endpoints, not assumptions about existing server routes.
- * Until the backend supplies them, the dashboard displays clearly labelled demo data.
+ * Uses the backend admin routes protected by the X-Admin-Key header.
  */
 (() => {
   'use strict';
 
-  const API_BASE = '/api';
   const ENDPOINTS = {
-    overview: `${API_BASE}/admin/overview`,
-    sessions: `${API_BASE}/admin/sessions`,
-    payments: `${API_BASE}/admin/payments`
+    stats: '/admin/stats',
+    analytics: '/admin/analytics',
+    sessions: '/admin/sessions?status=active&page=1&limit=100',
+    payments: '/admin/transactions?page=1&limit=100'
   };
 
   const demo = {
@@ -61,56 +51,144 @@
     ]
   };
 
-  const state = { overview: demo.overview, sessions: demo.sessions, payments: demo.payments, demoMode: true, period: 'today' };
+  const state = { overview: demo.overview, sessions: demo.sessions, payments: demo.payments, analytics: [], demoMode: true, period: 'today', showAllPayments: false, paymentTotal: demo.payments.length, sessionTotal: demo.sessions.length };
   const $ = (id) => document.getElementById(id);
   const kes = (value) => `KES ${Number(value || 0).toLocaleString('en-KE', { maximumFractionDigits: 0 })}`;
   const safe = (value) => String(value ?? '—').replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
   const initials = (value) => (String(value || 'C').trim()[0] || 'C').toUpperCase();
 
-  async function getJson(url) {
-    const response = await fetch(url, { credentials: 'same-origin', headers: { Accept: 'application/json' } });
-    if (!response.ok) throw new Error(`${url} returned HTTP ${response.status}`);
+  async function getJson(url, adminKey) {
+    const response = await fetch(url, { credentials: 'same-origin', headers: { Accept: 'application/json', 'X-Admin-Key': adminKey } });
+    if (!response.ok) {
+      const error = new Error(`${url} returned HTTP ${response.status}`);
+      error.status = response.status;
+      throw error;
+    }
     return response.json();
   }
 
-  function normalizeList(payload, key) {
-    if (Array.isArray(payload)) return payload;
-    if (payload && Array.isArray(payload[key])) return payload[key];
-    if (payload && payload.data && Array.isArray(payload.data[key])) return payload.data[key];
-    return null;
+  function adminKey() {
+    let key = sessionStorage.getItem('fastwifi-admin-key');
+    if (!key) {
+      key = window.prompt('Enter the FastWiFi admin API key');
+      if (key) sessionStorage.setItem('fastwifi-admin-key', key.trim());
+    }
+    return key ? key.trim() : '';
+  }
+
+  function formatDate(value, options = { dateStyle: 'medium', timeStyle: 'short' }) {
+    if (!value) return '—';
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString([], options);
+  }
+
+  function remainingTime(expiry) {
+    const minutes = Math.max(0, Math.floor((new Date(expiry).getTime() - Date.now()) / 60000));
+    return `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, '0')}m`;
+  }
+
+  function mapSession(session) {
+    return {
+      ...session,
+      name: 'Customer',
+      phone: session.phone_number,
+      device: 'Hotspot client',
+      ip: session.ip_address,
+      package_name: '—',
+      connected_since: formatDate(session.start_time),
+      remaining: remainingTime(session.expiry),
+      status: session.status === 'active' ? 'online' : session.status
+    };
+  }
+
+  function mapTransaction(transaction) {
+    return {
+      ...transaction,
+      reference: transaction.mpesa_ref || transaction.checkout_request_id || `#${transaction.id}`,
+      name: 'Customer',
+      phone: transaction.phone_number,
+      package_name: transaction.package_id ? `Package ${transaction.package_id}` : 'Account top-up',
+      created_at: formatDate(transaction.created_at)
+    };
+  }
+
+  async function loadDashboard(key) {
+    const results = await Promise.allSettled([
+      getJson(ENDPOINTS.stats, key),
+      getJson('/admin/analytics?days=90', key),
+      getJson(ENDPOINTS.sessions, key),
+      getJson(ENDPOINTS.payments, key)
+    ]);
+    const authFailure = results.find(result => result.status === 'rejected' && [401, 403].includes(result.reason.status));
+    if (authFailure) throw authFailure.reason;
+
+    const stats = results[0].status === 'fulfilled' ? results[0].value : null;
+    const analytics = results[1].status === 'fulfilled' ? results[1].value.data || [] : [];
+    const hasLiveData = results.some(result => result.status === 'fulfilled');
+    state.demoMode = !hasLiveData;
+    if (hasLiveData) {
+      state.analytics = analytics;
+      const thisMonth = new Date().toISOString().slice(0, 7);
+      const monthlyRows = analytics.filter(row => row.date.startsWith(thisMonth));
+      const selectedRows = state.period === 'today' ? analytics.slice(-1) : analytics.slice(state.period === '7days' ? -7 : -30);
+      const yesterday = analytics[analytics.length - 2];
+      const yesterdayRevenue = Number(yesterday?.revenue || 0);
+      const todayRevenue = Number(stats?.today_revenue ?? analytics[analytics.length - 1]?.revenue ?? 0);
+      state.overview = {
+        connected_count: Number(stats?.active_sessions ?? 0),
+        today_revenue: todayRevenue,
+        month_revenue: monthlyRows.reduce((sum, row) => sum + Number(row.revenue || 0), 0),
+        successful_payments: selectedRows.reduce((sum, row) => sum + Number(row.transactions || 0), 0),
+        monthly_payments: monthlyRows.reduce((sum, row) => sum + Number(row.transactions || 0), 0),
+        success_rate: stats?.total_transactions ? (stats.successful_transactions / stats.total_transactions) * 100 : 0,
+        daily_change: yesterdayRevenue ? ((todayRevenue - yesterdayRevenue) / yesterdayRevenue) * 100 : 0,
+        revenue_series: analytics.map(row => ({ label: new Date(`${row.date}T00:00:00`).toLocaleDateString([], { weekday: 'short', day: 'numeric' }), amount: Number(row.revenue || 0) })),
+        packages: []
+      };
+      if (results[2].status === 'fulfilled') {
+        state.sessions = (results[2].value.data || []).map(mapSession);
+        state.sessionTotal = results[2].value.pagination?.total ?? state.sessions.length;
+      } else { state.sessions = []; state.sessionTotal = 0; }
+      if (results[3].status === 'fulfilled') {
+        state.payments = (results[3].value.data || []).map(mapTransaction);
+        state.paymentTotal = results[3].value.pagination?.total ?? state.payments.length;
+      } else { state.payments = []; state.paymentTotal = 0; }
+    }
   }
 
   async function refreshDashboard() {
     const button = $('refreshButton');
     button.disabled = true;
     button.textContent = '…';
-    let receivedAnyLiveData = false;
-    const results = await Promise.allSettled([
-      getJson(ENDPOINTS.overview),
-      getJson(ENDPOINTS.sessions),
-      getJson(ENDPOINTS.payments)
-    ]);
-
-    if (results[0].status === 'fulfilled' && results[0].value && typeof results[0].value === 'object') {
-      state.overview = results[0].value.data || results[0].value;
-      receivedAnyLiveData = true;
+    let key = adminKey();
+    if (!key) {
+      state.demoMode = true;
+      renderAll();
+      toast('Admin key not provided. Showing sample data.');
+    } else {
+      try {
+        await loadDashboard(key);
+      } catch (error) {
+        if ([401, 403].includes(error.status)) {
+          sessionStorage.removeItem('fastwifi-admin-key');
+          key = window.prompt('Admin key rejected. Enter a valid FastWiFi admin API key');
+          if (key) {
+            sessionStorage.setItem('fastwifi-admin-key', key.trim());
+            try { await loadDashboard(key.trim()); } catch (retryError) { toast(`Could not load admin data: ${retryError.message}`); }
+          } else {
+            state.demoMode = true;
+          }
+        } else {
+          toast(`Could not load admin data: ${error.message}`);
+        }
+      }
+      renderAll();
+      $('lastUpdated').textContent = `Updated ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+      if (!state.demoMode) toast('Dashboard refreshed.');
+      else if (!key) toast('Admin key not provided. Showing sample data.');
     }
-    if (results[1].status === 'fulfilled') {
-      const sessions = normalizeList(results[1].value, 'sessions');
-      if (sessions) { state.sessions = sessions; receivedAnyLiveData = true; }
-    }
-    if (results[2].status === 'fulfilled') {
-      const payments = normalizeList(results[2].value, 'payments');
-      if (payments) { state.payments = payments; receivedAnyLiveData = true; }
-    }
-
-    state.demoMode = !receivedAnyLiveData;
-    renderAll();
-    $('lastUpdated').textContent = `Updated ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
     button.disabled = false;
     button.textContent = '↻';
-    if (state.demoMode) toast('Admin API not connected. Showing sample data.');
-    else toast('Dashboard refreshed.');
   }
 
   function renderAll() {
@@ -130,18 +208,20 @@
     $('connectedMetric').textContent = Number(o.connected_count ?? state.sessions.length).toLocaleString();
     $('dailyRevenue').textContent = kes(o.today_revenue);
     $('monthlyRevenue').textContent = kes(o.month_revenue);
-    $('paymentCount').textContent = Number(o.successful_payments || 0).toLocaleString();
+    const periodRows = state.period === 'today' ? state.analytics.slice(-1) : state.analytics.slice(state.period === '7days' ? -7 : -30);
+    const periodPayments = state.demoMode ? o.successful_payments : periodRows.reduce((sum, row) => sum + Number(row.transactions || 0), 0);
+    $('paymentCount').textContent = Number(periodPayments || 0).toLocaleString();
     $('monthlyPayments').textContent = `${Number(o.monthly_payments || 0).toLocaleString()} payments`;
     $('successRate').textContent = `${Number(o.success_rate || 0).toLocaleString(undefined, { maximumFractionDigits: 1 })}% success`;
     const change = Number(o.daily_change || 0);
-    $('dailyChange').textContent = `${change >= 0 ? '+' : ''}${change}%`;
+    $('dailyChange').textContent = `${change >= 0 ? '+' : ''}${change.toFixed(1)}%`;
     $('dailyChange').className = `metric-chip ${change >= 0 ? 'positive' : ''}`;
     $('connectedNote').textContent = 'Active sessions';
   }
 
   function getSeries() {
     let series = state.overview?.revenue_series;
-    if (!Array.isArray(series) || !series.length) series = demo.overview.revenue_series;
+    if (!Array.isArray(series) || !series.length) series = state.demoMode ? demo.overview.revenue_series : [];
     if (state.period === 'today') return series.slice(-7);
     if (state.period === '7days') return series.slice(-7);
     return series.slice(-30);
@@ -149,6 +229,13 @@
 
   function renderChart() {
     const series = getSeries();
+    if (!series.length) {
+      $('chartTotal').textContent = kes(0);
+      $('chartCaption').textContent = 'No analytics data available';
+      $('chartYLabels').innerHTML = '<span>0</span><span>0</span><span>0</span><span>0</span>';
+      $('revenueChart').innerHTML = '';
+      return;
+    }
     const max = Math.max(1, ...series.map(x => Number(x.amount || x.revenue || 0)));
     const total = series.reduce((sum, x) => sum + Number(x.amount || x.revenue || 0), 0);
     $('chartTotal').textContent = kes(total);
@@ -178,8 +265,8 @@
   function renderSessions() {
     const query = ($('customerSearch').value || '').toLowerCase().trim();
     const sessions = state.sessions.filter(s => [s.name, s.phone, s.device, s.ip, s.package_name].some(v => String(v || '').toLowerCase().includes(query)));
-    $('connectedTableCount').textContent = `${state.sessions.length} online`;
-    $('connectedFooter').textContent = `Showing ${sessions.length} of ${state.sessions.length} connected sessions`;
+    $('connectedTableCount').textContent = `${state.sessionTotal} online`;
+    $('connectedFooter').textContent = `Showing ${sessions.length} of ${state.sessionTotal} connected sessions (maximum 100 loaded)`;
     if (!sessions.length) {
       $('connectedTableBody').innerHTML = '<tr><td colspan="6" class="empty-cell">No connected customers match your search.</td></tr>';
       return;
@@ -193,8 +280,8 @@
   }
 
   function renderPayments() {
-    const payments = [...state.payments].slice(0, 8);
-    $('paymentsFooter').textContent = `Showing ${payments.length} recent transactions`;
+    const payments = state.showAllPayments ? state.payments : state.payments.slice(0, 8);
+    $('paymentsFooter').textContent = `Showing ${payments.length} of ${state.paymentTotal} transactions (maximum 100 loaded)`;
     if (!payments.length) {
       $('paymentsTableBody').innerHTML = '<tr><td colspan="6" class="empty-cell">No payments found.</td></tr>';
       return;
@@ -246,7 +333,7 @@
   function setupEvents() {
     $('refreshButton').addEventListener('click', refreshDashboard);
     $('exportButton').addEventListener('click', exportCsv);
-    $('periodSelect').addEventListener('change', event => { state.period = event.target.value; renderChart(); });
+    $('periodSelect').addEventListener('change', event => { state.period = event.target.value; renderMetrics(); renderChart(); });
     $('customerSearch').addEventListener('input', renderSessions);
     $('menuButton').addEventListener('click', () => {
       const open = $('sidebar').classList.toggle('open');
@@ -260,7 +347,9 @@
     }));
     $('viewAllPayments').addEventListener('click', event => {
       event.preventDefault();
-      toast('This starter shows the latest 5 sample transactions. Connect a paginated payments endpoint to view all.');
+      state.showAllPayments = !state.showAllPayments;
+      event.currentTarget.innerHTML = state.showAllPayments ? 'Show recent <span>→</span>' : 'View all <span>→</span>';
+      renderPayments();
     });
   }
 

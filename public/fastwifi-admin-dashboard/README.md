@@ -1,4 +1,4 @@
-# FastWiFi Admin Dashboard starter
+# FastWiFi Admin Dashboard
 
 ## Files
 - `index.html` — dashboard layout
@@ -6,22 +6,23 @@
 - `js/admin.js` — rendering, search, CSV export, refresh and API integration placeholders
 
 ## Quick start
-Copy the files into the same frontend root that serves the customer page. If your app already has an `index.html`, use this dashboard file as `admin.html` instead and adjust the stylesheet/script links if your server uses a different static root.
+The dashboard is served by the existing Express static middleware at `/fastwifi-admin-dashboard/admin.html`. The stylesheet and script use paths relative to that page, so they work from the current `public/fastwifi-admin-dashboard/` location.
 
 The HTML deliberately loads CSS and JavaScript externally to work with a strict CSP such as `script-src 'self'`.
 
-## Important: demo data vs live data
-The dashboard starts with sample data and displays a banner so it is not mistaken for live business data. It then attempts these suggested endpoints:
-- `GET /api/admin/overview`
-- `GET /api/admin/sessions`
-- `GET /api/admin/payments`
+## Backend integration
+The dashboard calls the existing admin routes and sends the `X-Admin-Key` header:
+- `GET /admin/stats` for summary metrics
+- `GET /admin/analytics?days=90` for daily revenue and successful transaction counts
+- `GET /admin/sessions?status=active&page=1&limit=100` for active sessions
+- `GET /admin/transactions?page=1&limit=100` for recent payments
 
-These routes are integration placeholders; they were not present in the provided customer page, so they must be implemented or changed to match your backend. Each endpoint should return JSON. Example shapes are documented at the top of `js/admin.js`.
+On first load, enter the value of `ADMIN_API_KEY` from the server’s environment. The key is kept only in this browser tab’s `sessionStorage`; it is cleared when that tab session ends. Never hard-code the key in frontend files. If the key is missing or rejected, the dashboard stays in clearly labelled demo mode.
 
-The dashboard currently expects fields such as `connected_count`, `today_revenue`, `month_revenue`, `sessions`, and `payments`. Adjust the normalizers if your backend uses different field names.
+The backend limits list endpoints to 100 rows per request. The dashboard shows the first 8 transactions by default; “View all” expands to the maximum 100 returned. The existing API does not expose package sales or package names on sessions, so those columns are shown as unavailable rather than fabricated. Package-level sales analytics would require an additional backend endpoint/query.
 
 ## Production checklist
-1. Add authentication and authorization to all admin pages and API routes. Do not rely on hiding the URL.
+1. Prefer a server-side admin login/session or authenticated reverse proxy in production. A shared API key entered into a browser is exposed to that operator and is not a substitute for per-user authentication.
 2. Make the server calculate revenue from verified successful M-Pesa callbacks/transactions, not from payment initiation attempts.
 3. Get connected-client/session data from your router/captive portal/RADIUS source, not from payment records.
 4. Protect phone numbers and other customer information; return only fields the admin needs.
