@@ -30,7 +30,7 @@ app.use(cors({
         ? process.env.CORS_ORIGIN.split(',').map(o => o.trim())
         : ['http://localhost:3000'],
     methods: ['GET', 'POST'],
-    allowedHeaders: ['Content-Type', 'Authorization']
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Admin-Key']
 }));
 
 app.use(express.json());
@@ -966,32 +966,300 @@ app.get('/api/portal/status/:checkoutRequestId', async (req, res) => {
 // ============ ADMIN ROUTES ============
 
 /**
+ * Validates shared pagination and search parameters for admin list endpoints.
+ */
+const getAdminListOptions = (req, res) => {
+    const pageParam = req.query.page === undefined ? '1' : req.query.page;
+    const limitParam = req.query.limit === undefined ? '25' : req.query.limit;
+    const search = req.query.search === undefined ? '' : req.query.search;
+    const status = req.query.status === undefined ? '' : req.query.status;
+
+    if (typeof pageParam !== 'string' || !/^\d+$/.test(pageParam) ||
+        !Number.isSafeInteger(Number(pageParam)) || Number(pageParam) < 1) {
+        sendError(res, 400, 'Page must be a positive integer');
+        return null;
+    }
+
+    if (typeof limitParam !== 'string' || !/^\d+$/.test(limitParam) ||
+        !Number.isInteger(Number(limitParam)) || Number(limitParam) < 1 || Number(limitParam) > 100) {
+        sendError(res, 400, 'Limit must be an integer between 1 and 100');
+        return null;
+    }
+
+    if (typeof search !== 'string' || search.length > 100) {
+        sendError(res, 400, 'Search must be a string no longer than 100 characters');
+        return null;
+    }
+
+    if (typeof status !== 'string' || status.length > 20) {
+        sendError(res, 400, 'Status must be a string no longer than 20 characters');
+        return null;
+    }
+
+    const offset = (Number(pageParam) - 1) * Number(limitParam);
+    if (!Number.isSafeInteger(offset)) {
+        sendError(res, 400, 'Page is too large');
+        return null;
+    }
+
+    return {
+        page: Number(pageParam),
+        limit: Number(limitParam),
+        offset,
+        search: search.trim(),
+        status: status.trim()
+    };
+};
+
+const sendAdminList = (res, rows, total, options) => {
+    res.json({
+        data: rows,
+        pagination: {
+            page: options.page,
+            limit: options.limit,
+            total,
+            total_pages: Math.ceil(total / options.limit)
+        }
+    });
+};
+
+/**
  * GET /admin/stats
  * Get system statistics.
  * Requires X-Admin-Key header matching ADMIN_API_KEY in .env
  */
 app.get('/admin/stats', adminMiddleware, async (req, res) => {
     try {
-        const [usersResult, revenueResult, todayResult, activeResult] = await Promise.all([
-            pool.query('SELECT COUNT(*) AS count FROM users'),
-            pool.query(`SELECT COALESCE(SUM(amount), 0) AS total FROM transactions WHERE status = 'success'`),
+        const [usersResult, transactionsResult, activeResult] = await Promise.all([
             pool.query(
-                `SELECT COUNT(*) AS count, COALESCE(SUM(amount), 0) AS total
-                 FROM transactions
-                 WHERE status = 'success' AND DATE(created_at) = CURRENT_DATE`
+                `SELECT COUNT(*) AS total,
+                        COUNT(*) FILTER (WHERE created_at >= CURRENT_DATE
+                                          AND created_at < CURRENT_DATE + INTERVAL '1 day') AS today
+                 FROM users`
+            ),
+            pool.query(
+                `SELECT COUNT(*) AS total,
+                        COUNT(*) FILTER (WHERE status = 'success') AS successful,
+                        COUNT(*) FILTER (WHERE status = 'pending') AS pending,
+                        COUNT(*) FILTER (WHERE status = 'failed') AS failed,
+                        COUNT(*) FILTER (WHERE status = 'success'
+                                          AND created_at >= CURRENT_DATE
+                                          AND created_at < CURRENT_DATE + INTERVAL '1 day') AS today_count,
+                        COALESCE(SUM(amount) FILTER (WHERE status = 'success'), 0) AS revenue,
+                        COALESCE(SUM(amount) FILTER (
+                            WHERE status = 'success'
+                              AND created_at >= CURRENT_DATE
+                              AND created_at < CURRENT_DATE + INTERVAL '1 day'
+                        ), 0) AS today_revenue
+                 FROM transactions`
             ),
             pool.query(`SELECT COUNT(*) AS count FROM sessions WHERE status = 'active'`)
         ]);
 
+        const users = usersResult.rows[0];
+        const transactions = transactionsResult.rows[0];
         res.json({
-            total_users: parseInt(usersResult.rows[0].count),
-            total_revenue: revenueResult.rows[0].total,
-            today_transactions: parseInt(todayResult.rows[0].count),
-            today_revenue: todayResult.rows[0].total,
-            active_sessions: parseInt(activeResult.rows[0].count)
+            total_users: parseInt(users.total, 10),
+            new_users_today: parseInt(users.today, 10),
+            total_transactions: parseInt(transactions.total, 10),
+            successful_transactions: parseInt(transactions.successful, 10),
+            pending_transactions: parseInt(transactions.pending, 10),
+            failed_transactions: parseInt(transactions.failed, 10),
+            total_revenue: transactions.revenue,
+            today_transactions: parseInt(transactions.today_count, 10),
+            today_revenue: transactions.today_revenue,
+            active_sessions: parseInt(activeResult.rows[0].count, 10)
         });
     } catch (error) {
         console.error('❌ Stats Error:', error);
+        return sendError(res, 500, 'Server error', error);
+    }
+});
+
+/**
+ * GET /admin/analytics?days=30
+ * Returns daily successful revenue/transaction totals and new user counts.
+ */
+app.get('/admin/analytics', adminMiddleware, async (req, res) => {
+    const daysParam = req.query.days === undefined ? '30' : req.query.days;
+    if (typeof daysParam !== 'string' || !/^\d+$/.test(daysParam) ||
+        !Number.isInteger(Number(daysParam)) || Number(daysParam) < 1 || Number(daysParam) > 90) {
+        return sendError(res, 400, 'Days must be an integer between 1 and 90');
+    }
+    const days = Number(daysParam);
+
+    try {
+        const result = await pool.query(
+            `WITH date_range AS (
+                 SELECT generate_series(
+                     CURRENT_DATE - ($1::int - 1),
+                     CURRENT_DATE,
+                     INTERVAL '1 day'
+                 )::date AS day
+             ),
+             daily_transactions AS (
+                 SELECT created_at::date AS day, COUNT(*) AS transactions, SUM(amount) AS revenue
+                 FROM transactions
+                 WHERE status = 'success'
+                   AND created_at >= CURRENT_DATE - ($1::int - 1)
+                   AND created_at < CURRENT_DATE + INTERVAL '1 day'
+                 GROUP BY created_at::date
+             ),
+             daily_users AS (
+                 SELECT created_at::date AS day, COUNT(*) AS new_users
+                 FROM users
+                 WHERE created_at >= CURRENT_DATE - ($1::int - 1)
+                   AND created_at < CURRENT_DATE + INTERVAL '1 day'
+                 GROUP BY created_at::date
+             )
+             SELECT TO_CHAR(d.day, 'YYYY-MM-DD') AS date,
+                    COALESCE(t.revenue, 0) AS revenue,
+                    COALESCE(t.transactions, 0)::int AS transactions,
+                    COALESCE(u.new_users, 0)::int AS new_users
+             FROM date_range d
+             LEFT JOIN daily_transactions t ON t.day = d.day
+             LEFT JOIN daily_users u ON u.day = d.day
+             ORDER BY d.day`,
+            [days]
+        );
+
+        res.json({ days, data: result.rows });
+    } catch (error) {
+        console.error('❌ Admin Analytics Error:', error);
+        return sendError(res, 500, 'Server error', error);
+    }
+});
+
+/**
+ * GET /admin/users?search=&status=&page=1&limit=25
+ */
+app.get('/admin/users', adminMiddleware, async (req, res) => {
+    const options = getAdminListOptions(req, res);
+    if (!options) return;
+
+    const conditions = [];
+    const values = [];
+    if (options.status) {
+        values.push(options.status);
+        conditions.push(`status = $${values.length}`);
+    }
+    if (options.search) {
+        values.push(`%${options.search}%`);
+        conditions.push(`phone_number ILIKE $${values.length}`);
+    }
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+
+    try {
+        const countValues = [...values];
+        const listValues = [...values, options.limit, options.offset];
+        const [countResult, usersResult] = await Promise.all([
+            pool.query(`SELECT COUNT(*) AS count FROM users ${where}`, countValues),
+            pool.query(
+                `SELECT id, phone_number, account_balance, status, created_at
+                 FROM users ${where}
+                 ORDER BY created_at DESC, id DESC
+                 LIMIT $${listValues.length - 1} OFFSET $${listValues.length}`,
+                listValues
+            )
+        ]);
+
+        sendAdminList(res, usersResult.rows, parseInt(countResult.rows[0].count, 10), options);
+    } catch (error) {
+        console.error('❌ Admin Users Error:', error);
+        return sendError(res, 500, 'Server error', error);
+    }
+});
+
+/**
+ * GET /admin/sessions?search=&status=&page=1&limit=25
+ * Deliberately excludes Mikrotik passwords and session keys.
+ */
+app.get('/admin/sessions', adminMiddleware, async (req, res) => {
+    const options = getAdminListOptions(req, res);
+    if (!options) return;
+
+    const conditions = [];
+    const values = [];
+    if (options.status) {
+        values.push(options.status);
+        conditions.push(`s.status = $${values.length}`);
+    }
+    if (options.search) {
+        values.push(`%${options.search}%`);
+        conditions.push(`(u.phone_number ILIKE $${values.length} OR s.mikrotik_username ILIKE $${values.length})`);
+    }
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+
+    try {
+        const listValues = [...values, options.limit, options.offset];
+        const [countResult, sessionsResult] = await Promise.all([
+            pool.query(
+                `SELECT COUNT(*) AS count
+                 FROM sessions s JOIN users u ON u.id = s.user_id ${where}`,
+                values
+            ),
+            pool.query(
+                `SELECT s.id, s.user_id, u.phone_number, s.mikrotik_username,
+                        s.ip_address, s.start_time,
+                        s.start_time + (s.duration_hours * INTERVAL '1 hour') AS expiry,
+                        s.duration_hours, s.cost_amount, s.status
+                 FROM sessions s JOIN users u ON u.id = s.user_id ${where}
+                 ORDER BY s.start_time DESC, s.id DESC
+                 LIMIT $${listValues.length - 1} OFFSET $${listValues.length}`,
+                listValues
+            )
+        ]);
+
+        sendAdminList(res, sessionsResult.rows, parseInt(countResult.rows[0].count, 10), options);
+    } catch (error) {
+        console.error('❌ Admin Sessions Error:', error);
+        return sendError(res, 500, 'Server error', error);
+    }
+});
+
+/**
+ * GET /admin/transactions?search=&status=&page=1&limit=25
+ */
+app.get('/admin/transactions', adminMiddleware, async (req, res) => {
+    const options = getAdminListOptions(req, res);
+    if (!options) return;
+
+    const conditions = [];
+    const values = [];
+    if (options.status) {
+        values.push(options.status);
+        conditions.push(`t.status = $${values.length}`);
+    }
+    if (options.search) {
+        values.push(`%${options.search}%`);
+        conditions.push(
+            `(u.phone_number ILIKE $${values.length} OR t.mpesa_ref ILIKE $${values.length} OR t.checkout_request_id ILIKE $${values.length})`
+        );
+    }
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+
+    try {
+        const listValues = [...values, options.limit, options.offset];
+        const [countResult, transactionsResult] = await Promise.all([
+            pool.query(
+                `SELECT COUNT(*) AS count
+                 FROM transactions t JOIN users u ON u.id = t.user_id ${where}`,
+                values
+            ),
+            pool.query(
+                `SELECT t.id, t.user_id, u.phone_number, t.mpesa_ref,
+                        t.checkout_request_id, t.amount, t.status,
+                        t.package_id, t.created_at
+                 FROM transactions t JOIN users u ON u.id = t.user_id ${where}
+                 ORDER BY t.created_at DESC, t.id DESC
+                 LIMIT $${listValues.length - 1} OFFSET $${listValues.length}`,
+                listValues
+            )
+        ]);
+
+        sendAdminList(res, transactionsResult.rows, parseInt(countResult.rows[0].count, 10), options);
+    } catch (error) {
+        console.error('❌ Admin Transactions Error:', error);
         return sendError(res, 500, 'Server error', error);
     }
 });

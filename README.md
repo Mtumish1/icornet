@@ -205,6 +205,22 @@ GET /api/sessions/history (requires auth token)
 GET /api/transactions/history (requires auth token)
 ```
 
+### Admin Dashboard
+All admin endpoints require `X-Admin-Key: <ADMIN_API_KEY>` and return `403` when the key is missing or invalid.
+
+```
+GET /admin/stats
+└─ Summary metrics: users, transactions, revenue, and active sessions
+
+GET /admin/analytics?days=30
+└─ Daily successful revenue, transaction counts, and new users (1-90 days)
+
+GET /admin/users?search=2547&status=active&page=1&limit=25
+GET /admin/sessions?search=2547&status=active&page=1&limit=25
+GET /admin/transactions?search=2547&status=success&page=1&limit=25
+└─ Searchable, filterable lists with { data, pagination }; limit is capped at 100
+```
+
 ---
 
 ## ⚙️ Configuration Guide
