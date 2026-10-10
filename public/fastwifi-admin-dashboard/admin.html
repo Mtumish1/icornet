@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>FastWiFi Admin Dashboard</title>
+  <link rel="stylesheet" href="/css/admin.css">
+  <script src="/js/admin.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <a class="brand" href="./admin.html" aria-label="FastWiFi dashboard home">
+        <span class="brand-mark"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 8.8a14.1 14.1 0 0 1 19 0M5.7 12a9.3 9.3 0 0 1 12.6 0M8.9 15.2a4.6 4.6 0 0 1 6.2 0M12 19h.01"/></svg></span>
+        <span>Fast<span class="brand-accent">WiFi</span><small>NETWORK ADMIN</small></span>
+      </a>
+      <div class="nav-label">WORKSPACE</div>
+      <nav class="side-nav" aria-label="Main navigation">
+        <a class="nav-item active" href="#overview"><span class="nav-icon">▦</span> Overview</a>
+        <a class="nav-item" href="#connected"><span class="nav-icon">◉</span> Connected customers <span class="nav-count" id="navConnectedCount">—</span></a>
+        <a class="nav-item" href="#payments"><span class="nav-icon">↗</span> Payments</a>
+        <a class="nav-item" href="#packages"><span class="nav-icon">◫</span> WiFi packages</a>
+      </nav>
+      <div class="sidebar-bottom">
+        <div class="status-card"><span class="status-dot"></span><div><strong>Network status</strong><small id="networkStatus">Demo mode</small></div></div>
+        <div class="admin-profile"><div class="avatar">A</div><div><strong>Administrator</strong><small>FastWiFi operator</small></div><span class="profile-dots">•••</span></div>
+      </div>
+    </aside>
+
+    <main class="main-content" id="overview">
+      <header class="topbar">
+        <button class="mobile-menu" id="menuButton" aria-label="Toggle navigation" aria-expanded="false">☰</button>
+        <div class="breadcrumb">Workspace <span>/</span> <strong>Overview</strong></div>
+        <div class="topbar-actions">
+          <span class="live-indicator"><i></i> Dashboard</span>
+          <button class="icon-button" id="refreshButton" aria-label="Refresh dashboard" title="Refresh dashboard">↻</button>
+          <div class="today-label" id="todayLabel">Today</div>
+        </div>
+      </header>
+
+      <section class="page-heading">
+        <div>
+          <p class="eyebrow">NETWORK SUMMARY</p>
+          <h1>Good day, Admin <span class="wave">✦</span></h1>
+          <p class="muted">Here’s what’s happening with your WiFi business.</p>
+        </div>
+        <div class="heading-actions">
+          <label class="date-select-label" for="periodSelect">Period</label>
+          <select id="periodSelect" class="select-control">
+            <option value="today">Today</option>
+            <option value="7days">Last 7 days</option>
+            <option value="30days">Last 30 days</option>
+          </select>
+          <button class="button-primary" id="exportButton"><span>↓</span> Export CSV</button>
+        </div>
+      </section>
+
+      <div class="demo-banner" id="demoBanner"><span>ⓘ</span> Showing sample data until the admin API is connected. Metrics are illustrative, not live.</div>
+
+      <section class="metrics-grid" aria-label="Key metrics">
+        <article class="metric-card">
+          <div class="metric-top"><span class="metric-label">Currently connected</span><span class="metric-icon orange">◉</span></div>
+          <div class="metric-value" id="connectedMetric">—</div>
+          <div class="metric-foot"><span class="metric-live"><i></i> Live sessions</span><span class="metric-note" id="connectedNote">Active devices</span></div>
+        </article>
+        <article class="metric-card">
+          <div class="metric-top"><span class="metric-label">Today's earnings</span><span class="metric-icon green">↗</span></div>
+          <div class="metric-value" id="dailyRevenue">KES —</div>
+          <div class="metric-foot"><span class="metric-note">Successful payments</span><span class="metric-chip positive" id="dailyChange">Today</span></div>
+        </article>
+        <article class="metric-card">
+          <div class="metric-top"><span class="metric-label">This month's earnings</span><span class="metric-icon purple">▤</span></div>
+          <div class="metric-value" id="monthlyRevenue">KES —</div>
+          <div class="metric-foot"><span class="metric-note">Month to date</span><span class="metric-chip" id="monthlyPayments">— payments</span></div>
+        </article>
+        <article class="metric-card">
+          <div class="metric-top"><span class="metric-label">Successful payments</span><span class="metric-icon blue">✓</span></div>
+          <div class="metric-value" id="paymentCount">—</div>
+          <div class="metric-foot"><span class="metric-note">Selected period</span><span class="metric-chip" id="successRate">— success rate</span></div>
+        </article>
+      </section>
+
+      <section class="content-grid">
+        <article class="panel revenue-panel">
+          <div class="panel-header">
+            <div><h2>Revenue overview</h2><p class="muted">Successful payments · Kenyan shillings</p></div>
+            <span class="chart-legend"><i></i> Revenue</span>
+          </div>
+          <div class="revenue-summary"><strong id="chartTotal">KES —</strong><span id="chartCaption">for the selected period</span></div>
+          <div class="chart-wrap">
+            <div class="chart-y-labels" id="chartYLabels"><span>—</span><span>—</span><span>—</span><span>0</span></div>
+            <div class="bar-chart" id="revenueChart" role="img" aria-label="Revenue bar chart"></div>
+          </div>
+        </article>
+        <article class="panel package-panel" id="packages">
+          <div class="panel-header"><div><h2>Package performance</h2><p class="muted">Sales by WiFi package</p></div><span class="subtle-badge">Top packages</span></div>
+          <div id="packageList" class="package-list"></div>
+        </article>
+      </section>
+
+      <section class="panel table-panel" id="connected">
+        <div class="panel-header table-heading">
+          <div><h2>Connected customers</h2><p class="muted">Devices currently using your network</p></div>
+          <div class="table-actions"><span class="count-pill" id="connectedTableCount">0 online</span><input id="customerSearch" class="search-input" type="search" placeholder="Search phone or device…" aria-label="Search connected customers"></div>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Customer / phone</th><th>Device / IP address</th><th>WiFi package</th><th>Connected since</th><th>Time remaining</th><th>Status</th></tr></thead>
+            <tbody id="connectedTableBody"><tr><td colspan="6" class="empty-cell">Loading customers…</td></tr></tbody>
+          </table>
+        </div>
+        <div class="table-footer"><span id="connectedFooter">Showing connected sessions</span><span class="muted">Refresh to update session status</span></div>
+      </section>
+
+      <section class="panel table-panel" id="payments">
+        <div class="panel-header table-heading">
+          <div><h2>Recent payments</h2><p class="muted">Latest M-Pesa transactions</p></div>
+          <a class="text-link" href="#payments" id="viewAllPayments">View all <span>→</span></a>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Transaction</th><th>Customer</th><th>Package</th><th>Date &amp; time</th><th>Amount</th><th>Status</th></tr></thead>
+            <tbody id="paymentsTableBody"><tr><td colspan="6" class="empty-cell">Loading payments…</td></tr></tbody>
+          </table>
+        </div>
+        <div class="table-footer"><span id="paymentsFooter">Recent transaction activity</span><span class="muted">Only successful payments count toward earnings</span></div>
+      </section>
+
+      <footer class="page-footer"><span>FastWiFi Admin</span><span id="lastUpdated">Not yet refreshed</span></footer>
+      <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    </main>
+  </div>
+</body>
+</html>
