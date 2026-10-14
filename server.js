@@ -1266,8 +1266,23 @@ app.get('/admin/transactions', adminMiddleware, async (req, res) => {
 
 // ============ HEALTH CHECK ============
 
-app.get('/health', (req, res) => {
-    res.json({ status: 'OK', timestamp: new Date(), env: process.env.MPESA_ENV || 'sandbox' });
+app.get('/health', async (req, res) => {
+    try {
+        await pool.query('SELECT 1');
+        res.json({
+            status: 'OK',
+            database: 'connected',
+            timestamp: new Date(),
+            env: process.env.MPESA_ENV || 'sandbox'
+        });
+    } catch (err) {
+        console.error('❌ Health check failed:', err.message);
+        res.status(503).json({
+            status: 'ERROR',
+            database: 'unreachable',
+            timestamp: new Date()
+        });
+    }
 });
 
 // ============ GLOBAL ERROR HANDLER ============
