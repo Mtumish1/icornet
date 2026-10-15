@@ -9,14 +9,22 @@ const axios = require('axios');
 const { Pool } = require('pg');
 const dotenv = require('dotenv');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const { v4: uuidv4 } = require('uuid');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const { NodeSSH } = require('node-ssh');
 const cron = require('node-cron');
+const pino = require('pino');
 
 dotenv.config();
+
+// ============ STRUCTURED LOGGING ============
+
+const log = pino({
+    level: process.env.LOG_LEVEL || 'info'
+});
 
 const app = express();
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
@@ -36,9 +44,11 @@ app.use(cors({
 app.use(express.json());
 app.use(express.static('public'));
 
-// Request logging
+// Request logging (health checks are skipped — they fire every 30s)
 app.use((req, res, next) => {
-    console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
+    if (req.path !== '/health') {
+        log.info({ method: req.method, path: req.path }, 'request');
+    }
     next();
 });
 
@@ -88,6 +98,85 @@ const PHONE_REGEX = /^2547[0-9]{8}$/;
 
 const isValidPhone = (phone) => PHONE_REGEX.test(phone);
 
+// ============ CREDENTIAL ENCRYPTION (at rest) ============
+// Mikrotik WiFi passwords are stored in the DB as AES-256-GCM ciphertext
+// tagged 'enc:v1:...'. Values without the tag are returned as-is, so
+// rows written before this feature keep working.
+
+const CREDENTIALS_KEY = (() => {
+    const secret = process.env.CREDENTIALS_ENCRYPTION_KEY || process.env.JWT_SECRET;
+    if (!process.env.CREDENTIALS_ENCRYPTION_KEY && process.env.JWT_SECRET) {
+        log.warn('CREDENTIALS_ENCRYPTION_KEY not set — deriving from JWT_SECRET. Set a dedicated key in production.');
+    }
+    return crypto.createHash('sha256').update(`hotspot-credentials:v1:${secret}`).digest();
+})();
+
+/** Encrypts a secret for storage. Returns a tagged 'enc:v1:<iv>:<tag>:<data>' string. */
+const encryptSecret = (value) => {
+    if (value === null || value === undefined || value === '') return value;
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv('aes-256-gcm', CREDENTIALS_KEY, iv);
+    const encrypted = Buffer.concat([cipher.update(String(value), 'utf8'), cipher.final()]);
+    return [
+        'enc:v1',
+        iv.toString('base64'),
+        cipher.getAuthTag().toString('base64'),
+        encrypted.toString('base64')
+    ].join(':');
+};
+
+/** Decrypts a stored secret. Plaintext (legacy) values pass through unchanged. */
+const decryptSecret = (value) => {
+    if (typeof value !== 'string' || !value.startsWith('enc:v1:')) return value;
+    try {
+        const [, , ivB64, tagB64, dataB64] = value.split(':');
+        const decipher = crypto.createDecipheriv('aes-256-gcm', CREDENTIALS_KEY, Buffer.from(ivB64, 'base64'));
+        decipher.setAuthTag(Buffer.from(tagB64, 'base64'));
+        return Buffer.concat([decipher.update(Buffer.from(dataB64, 'base64')), decipher.final()]).toString('utf8');
+    } catch (error) {
+        log.error({ err: error.message }, 'Failed to decrypt stored credential');
+        return null;
+    }
+};
+
+// ============ M-PESA CALLBACK IP ALLOWLIST ============
+
+/** Comma-separated IPs/CIDRs (e.g. "196.201.214.0/24,196.201.213.0/24"). Empty = allow all. */
+const MPESA_ALLOWED_IPS = (process.env.MPESA_CALLBACK_IPS || '')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+
+const ipv4ToInt = (ip) => ip.split('.').reduce((acc, octet) => ((acc << 8) + Number(octet)) >>> 0, 0);
+
+/** Minimal IPv4 CIDR matcher (no external dependency). */
+const matchesCidr = (ip, cidr) => {
+    const [range, bitsRaw] = cidr.split('/');
+    const bits = bitsRaw === undefined ? 32 : Number(bitsRaw);
+    if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(ip) || !/^\d{1,3}(\.\d{1,3}){3}$/.test(range)) return false;
+    if (!Number.isInteger(bits) || bits < 0 || bits > 32) return false;
+    const mask = bits === 0 ? 0 : (0xFFFFFFFF << (32 - bits)) >>> 0;
+    return ((ipv4ToInt(ip) & mask) >>> 0) === ((ipv4ToInt(range) & mask) >>> 0);
+};
+
+const isIpAllowed = (ip, allowlist = MPESA_ALLOWED_IPS) => {
+    if (!allowlist.length) return true;
+    if (!ip) return false;
+    return allowlist.some((entry) => entry === ip || matchesCidr(ip, entry));
+};
+
+/** Rejects callbacks whose source IP is not on the MPESA_CALLBACK_IPS allowlist. */
+const mpesaCallbackGuard = (req, res, next) => {
+    const forwarded = (req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+    const rawIp = forwarded || req.socket.remoteAddress || '';
+    const ip = rawIp.replace(/^::ffff:/, '');
+    if (!isIpAllowed(ip)) {
+        log.warn({ ip }, 'Rejected M-Pesa callback from non-allowlisted IP');
+        return res.status(403).json({ error: 'Forbidden' });
+    }
+    next();
+};
+
 // ============ M-PESA SERVICE ============
 
 class MPesaService {
@@ -97,7 +186,11 @@ class MPesaService {
         this.businessCode = process.env.MPESA_BUSINESS_SHORTCODE || '174379';
         this.passkey = process.env.MPESA_PASSKEY;
         this.environment = process.env.MPESA_ENV || 'sandbox';
+        this.mock = String(process.env.MOCK_MPESA).toLowerCase() === 'true';
         this.tokenCache = { token: null, expiry: null };
+        if (this.mock) {
+            log.warn('🧪 MOCK_MPESA enabled — STK pushes auto-confirm after ~8s. Never use in production.');
+        }
     }
 
     getBaseUrl() {
@@ -107,6 +200,10 @@ class MPesaService {
     }
 
     async getAccessToken() {
+        if (this.mock) {
+            return 'mock-access-token';
+        }
+
         // Return cached token if still valid (with 30s buffer)
         if (this.tokenCache.token && this.tokenCache.expiry > Date.now() + 30_000) {
             return this.tokenCache.token;
@@ -127,7 +224,7 @@ class MPesaService {
 
             return this.tokenCache.token;
         } catch (error) {
-            console.error('❌ M-Pesa Token Error:', error.response?.data || error.message);
+            log.error({ err: error.response?.data || error.message }, '❌ M-Pesa Token Error');
             throw error;
         }
     }
@@ -142,6 +239,10 @@ class MPesaService {
     }
 
     async stkPush(phoneNumber, amount, accountReference) {
+        if (this.mock) {
+            return this._mockStkPush(phoneNumber, amount);
+        }
+
         const token = await this.getAccessToken();
         const { timestamp, password } = this._getTimestampAndPassword();
 
@@ -160,7 +261,7 @@ class MPesaService {
         };
 
         try {
-            console.log('📱 Sending STK Push...', { phone: phoneNumber, amount });
+            log.info({ phone: phoneNumber, amount }, '📱 Sending STK Push');
 
             const response = await axios.post(
                 `${this.getBaseUrl()}/mpesa/stkpush/v1/processrequest`,
@@ -168,15 +269,23 @@ class MPesaService {
                 { headers: { 'Authorization': `Bearer ${token}` } }
             );
 
-            console.log('✅ STK Push Response:', response.data.ResponseCode);
+            log.info({ responseCode: response.data.ResponseCode }, '✅ STK Push accepted');
             return response.data;
         } catch (error) {
-            console.error('❌ STK Push Error:', error.response?.data || error.message);
+            log.error({ err: error.response?.data || error.message }, '❌ STK Push Error');
             throw error;
         }
     }
 
     async queryTransaction(checkoutRequestId) {
+        if (this.mock) {
+            return {
+                ResultCode: '0',
+                ResultDescription: 'The service request is processed successfully. (mock)',
+                CheckoutRequestID: checkoutRequestId
+            };
+        }
+
         const token = await this.getAccessToken();
         const { timestamp, password } = this._getTimestampAndPassword();
 
@@ -194,13 +303,92 @@ class MPesaService {
 
             return response.data;
         } catch (error) {
-            console.error('❌ Query Error:', error.response?.data || error.message);
+            log.error({ err: error.response?.data || error.message }, '❌ Query Error');
             throw error;
         }
+    }
+
+    /**
+     * Simulates a successful STK push when MOCK_MPESA=true.
+     * Schedules a fake success callback ~8s later so the real
+     * callback processing (DB credit + provisioning) is exercised.
+     */
+    _mockStkPush(phoneNumber, amount) {
+        const checkoutRequestId = `MOCK-CR-${uuidv4().replace(/-/g, '').substring(0, 14)}`;
+        log.info({ checkoutRequestId, phone: phoneNumber, amount }, '🧪 Mock STK push accepted — auto-confirming in ~8s');
+
+        const timer = setTimeout(() => {
+            processMpesaCallback({
+                MerchantRequestID: `MOCK-MR-${uuidv4().replace(/-/g, '').substring(0, 10)}`,
+                CheckoutRequestID: checkoutRequestId,
+                ResultCode: 0,
+                ResultDesc: 'The service request is processed successfully. (mock)',
+                CallbackMetadata: {
+                    Item: [
+                        { Name: 'Amount', Value: Math.round(amount) },
+                        { Name: 'MpesaReceiptNumber', Value: `MOCK${Date.now()}` },
+                        { Name: 'PhoneNumber', Value: phoneNumber.replace(/\D/g, '') }
+                    ]
+                }
+            }).catch((error) => log.error({ err: error.message }, '❌ Mock callback processing failed'));
+        }, 8000);
+        if (typeof timer.unref === 'function') timer.unref();
+
+        return {
+            ResponseCode: '0',
+            ResponseDescription: 'Success. Request accepted for processing (mock)',
+            MerchantRequestID: `MOCK-MR-${uuidv4().replace(/-/g, '').substring(0, 10)}`,
+            CheckoutRequestID: checkoutRequestId,
+            CustomerMessage: 'Success. Request accepted for processing (mock)'
+        };
     }
 }
 
 const mpesaService = new MPesaService();
+
+// ============ SMS SERVICE (Twilio) ============
+
+class SMSService {
+    constructor() {
+        this.sid = process.env.SMS_ACCOUNT_SID;
+        this.token = process.env.SMS_AUTH_TOKEN;
+        this.from = process.env.SMS_FROM_NUMBER;
+        this.provider = process.env.SMS_PROVIDER;
+        this.enabled = Boolean(this.sid && this.token && this.from);
+        if (this.provider && this.provider !== 'twilio') {
+            log.warn({ provider: this.provider }, 'Unsupported SMS provider — SMS notifications disabled');
+            this.enabled = false;
+        } else if (!this.enabled) {
+            log.info('SMS notifications disabled (SMS_ACCOUNT_SID / SMS_AUTH_TOKEN / SMS_FROM_NUMBER not set)');
+        }
+    }
+
+    /**
+     * Sends an SMS via the Twilio REST API. Never throws — failures are
+     * logged and returned as false so callers can fire-and-forget.
+     * @param {string} phoneNumber - Kenyan format 2547XXXXXXXX (a leading + is added)
+     * @param {string} message
+     * @returns {Promise<boolean>}
+     */
+    async send(phoneNumber, message) {
+        if (!this.enabled || !phoneNumber) return false;
+        const to = phoneNumber.startsWith('+') ? phoneNumber : `+${phoneNumber.replace(/\D/g, '')}`;
+        try {
+            await axios.post(
+                `https://api.twilio.com/2010-04-01/Accounts/${this.sid}/Messages.json`,
+                new URLSearchParams({ To: to, From: this.from, Body: message }),
+                { auth: { username: this.sid, password: this.token }, timeout: 10_000 }
+            );
+            log.info({ to }, '📱 SMS sent');
+            return true;
+        } catch (error) {
+            log.error({ err: error.response?.data || error.message, to }, '📱 SMS send failed');
+            return false;
+        }
+    }
+}
+
+const sms = new SMSService();
 
 // ============ MIKROTIK SERVICE ============
 
@@ -219,7 +407,7 @@ class MikrotikService {
     async executeCommand(command) {
         const ssh = new NodeSSH();
         try {
-            console.log(`🔧 Mikrotik CMD: ${command}`);
+            log.info(`🔧 Mikrotik CMD: ${command}`);
             await ssh.connect({
                 host: this.host,
                 username: this.user,
@@ -265,6 +453,18 @@ class MikrotikService {
 
 const mikrotik = new MikrotikService();
 
+/**
+ * Generates fresh credentials for a new WiFi session.
+ * The plaintext password lives only in memory long enough to be
+ * returned to the customer and pushed to the router — it is stored
+ * in the DB encrypted via encryptSecret().
+ */
+const createWifiCredentials = (userId) => ({
+    username: `wf_${userId}_${Date.now()}`.substring(0, 20),
+    password: uuidv4().substring(0, 12),
+    sessionKey: uuidv4().substring(0, 16)
+});
+
 // ============ AUTHENTICATION MIDDLEWARE ============
 
 const authMiddleware = (req, res, next) => {
@@ -296,6 +496,29 @@ const adminMiddleware = (req, res, next) => {
     next();
 };
 
+/**
+ * Records every admin API request (including rejected ones) into
+ * admin_audit_log. Fire-and-forget: audit failures are logged but
+ * never break the request.
+ */
+const auditAdmin = (req, res, next) => {
+    const startedAt = Date.now();
+    res.on('finish', () => {
+        const ip = (req.headers['x-forwarded-for'] || '').split(',')[0].trim()
+            || req.socket.remoteAddress
+            || '';
+        pool.query(
+            `INSERT INTO admin_audit_log (ip, method, path, status_code, duration_ms)
+             VALUES ($1, $2, $3, $4, $5)`,
+            [ip, req.method, (req.originalUrl || req.path).substring(0, 200), res.statusCode, Date.now() - startedAt]
+        ).catch((error) => log.error({ err: error.message }, 'Failed to write admin audit log'));
+    });
+    next();
+};
+
+/** Combined guard for all admin routes: key check + audit trail. */
+const adminGuard = [adminMiddleware, auditAdmin];
+
 // ============ API ROUTES ============
 
 /**
@@ -326,10 +549,10 @@ app.post('/api/auth/register', authLimiter, async (req, res) => {
                 [phone_number]
             );
             userId = createResult.rows[0].id;
-            console.log(`✅ New user registered: ${phone_number} (ID: ${userId})`);
+            log.info(`✅ New user registered: ${phone_number} (ID: ${userId})`);
         } else {
             userId = userResult.rows[0].id;
-            console.log(`✅ User logged in: ${phone_number}`);
+            log.info(`✅ User logged in: ${phone_number}`);
         }
 
         // Generate JWT token — 7 day expiry
@@ -347,7 +570,7 @@ app.post('/api/auth/register', authLimiter, async (req, res) => {
         });
 
     } catch (error) {
-        console.error('❌ Auth Error:', error);
+        log.error({ err: error }, '❌ Auth Error:');
         return sendError(res, 500, 'Server error', error);
     }
 });
@@ -370,7 +593,7 @@ app.get('/api/user/account', authMiddleware, async (req, res) => {
         res.json(result.rows[0]);
 
     } catch (error) {
-        console.error('❌ Account Error:', error);
+        log.error({ err: error }, '❌ Account Error:');
         return sendError(res, 500, 'Server error', error);
     }
 });
@@ -405,7 +628,7 @@ app.post('/api/payment/initiate', paymentLimiter, authMiddleware, async (req, re
             [req.userId, internalRef, amount]
         );
 
-        console.log(`💳 Transaction created: ${internalRef} (DB id: ${dbResult.rows[0].id})`);
+        log.info(`💳 Transaction created: ${internalRef} (DB id: ${dbResult.rows[0].id})`);
 
         // Trigger STK Push
         const stkResponse = await mpesaService.stkPush(
@@ -434,7 +657,7 @@ app.post('/api/payment/initiate', paymentLimiter, authMiddleware, async (req, re
         }
 
     } catch (error) {
-        console.error('❌ Payment Initiation Error:', error);
+        log.error({ err: error }, '❌ Payment Initiation Error:');
         return sendError(res, 500, 'Payment initiation failed', error);
     }
 });
@@ -444,180 +667,209 @@ app.post('/api/payment/initiate', paymentLimiter, authMiddleware, async (req, re
  * M-Pesa payment callback from Safaricom.
  *
  * Security:
+ *  - Source IP must be on the MPESA_CALLBACK_IPS allowlist (if configured).
  *  - Transaction is re-verified via queryTransaction() before crediting.
  *  - Transaction lookup uses the exact CheckoutRequestID column (no fuzzy LIKE).
  *  - Always responds with ResultCode: 0 so M-Pesa does not retry endlessly.
  */
-app.post('/mpesa/callback', async (req, res) => {
+app.post('/mpesa/callback', mpesaCallbackGuard, async (req, res) => {
     // Always respond 200 first — M-Pesa will retry if we don't
     res.json({ ResultCode: 0 });
 
     try {
         const { Body } = req.body;
         if (!Body || !Body.stkCallback) {
-            console.warn('⚠️ Malformed M-Pesa callback received');
+            log.warn('⚠️ Malformed M-Pesa callback received');
             return;
         }
-
-        const { stkCallback } = Body;
-        const { CheckoutRequestID, ResultCode, ResultDesc } = stkCallback;
-
-        console.log(`📞 M-Pesa Callback — ResultCode: ${ResultCode}, Ref: ${CheckoutRequestID}`);
-
-        if (ResultCode !== 0) {
-            console.log(`⚠️ Payment failed: ${ResultDesc}`);
-            // Mark the transaction as failed
-            await pool.query(
-                `UPDATE transactions SET status = 'failed' WHERE checkout_request_id = $1`,
-                [CheckoutRequestID]
-            );
-            return;
-        }
-
-        // Re-verify with M-Pesa before crediting (prevents spoofed callbacks)
-        let verifyResult;
-        try {
-            verifyResult = await mpesaService.queryTransaction(CheckoutRequestID);
-            if (verifyResult.ResultCode !== '0') {
-                console.warn(`⚠️ Callback verification failed for ${CheckoutRequestID}`);
-                return;
-            }
-        } catch (verifyErr) {
-            console.error('❌ Verification query failed, aborting credit:', verifyErr.message);
-            return;
-        }
-
-        // Extract amount from callback metadata
-        let amount = 0;
-        if (stkCallback.CallbackMetadata?.Item) {
-            stkCallback.CallbackMetadata.Item.forEach(item => {
-                if (item.Name === 'Amount') amount = parseFloat(item.Value);
-            });
-        }
-
-        if (amount <= 0) {
-            console.warn('⚠️ Invalid amount in callback, skipping credit');
-            return;
-        }
-
-        // Look up the transaction by exact CheckoutRequestID (not a fuzzy LIKE)
-        const transResult = await pool.query(
-            `SELECT id, user_id, status FROM transactions
-             WHERE checkout_request_id = $1 LIMIT 1`,
-            [CheckoutRequestID]
-        );
-
-        if (transResult.rows.length === 0) {
-            console.warn(`⚠️ No pending transaction found for ${CheckoutRequestID}`);
-            return;
-        }
-
-        const transaction = transResult.rows[0];
-
-        // Idempotency guard — do not process twice
-        if (transaction.status !== 'pending') {
-            console.log(`ℹ️ Transaction ${CheckoutRequestID} already processed (${transaction.status})`);
-            return;
-        }
-
-        const userId = transaction.user_id;
-
-        // Update transaction and user balance atomically
-        const client = await pool.connect();
-        try {
-            await client.query('BEGIN');
-
-            await client.query(
-                `UPDATE transactions SET status = 'success' WHERE id = $1`,
-                [transaction.id]
-            );
-
-            await client.query(
-                `UPDATE users SET account_balance = account_balance + $1 WHERE id = $2`,
-                [amount, userId]
-            );
-
-            await client.query('COMMIT');
-            console.log(`✅ Payment confirmed: KES ${amount} credited to user ${userId}`);
-        } catch (dbErr) {
-            await client.query('ROLLBACK');
-            console.error('❌ DB error crediting balance, rolled back:', dbErr.message);
-            client.release();
-            return;
-        }
-
-        // Auto-provision WiFi if this payment was for a specific package (portal flow)
-        if (transaction.package_id) {
-            try {
-                const pkgResult = await pool.query(
-                    'SELECT * FROM pricing WHERE id = $1',
-                    [transaction.package_id]
-                );
-
-                if (pkgResult.rows.length > 0) {
-                    const pkg = pkgResult.rows[0];
-                    const username = `wf_${userId}_${Date.now()}`.substring(0, 20);
-                    const password = uuidv4().substring(0, 12);
-                    const sessionKey = uuidv4().substring(0, 16);
-
-                    const provClient = await pool.connect();
-                    try {
-                        await provClient.query('BEGIN');
-
-                        // Deduct balance (atomic guard)
-                        const deduct = await provClient.query(
-                            `UPDATE users SET account_balance = account_balance - $1
-                             WHERE id = $2 AND account_balance >= $1
-                             RETURNING account_balance`,
-                            [pkg.price, userId]
-                        );
-
-                        if (deduct.rowCount === 0) {
-                            await provClient.query('ROLLBACK');
-                            console.warn(`⚠️ Insufficient balance to auto-provision for user ${userId}`);
-                        } else {
-                            // Create session
-                            await provClient.query(
-                                `INSERT INTO sessions
-                                   (user_id, session_key, mikrotik_username, mikrotik_password, start_time, duration_hours, cost_amount, status)
-                                 VALUES ($1, $2, $3, $4, NOW(), $5, $6, 'active')`,
-                                [userId, sessionKey, username, password, pkg.hours, pkg.price]
-                            );
-
-                            // Link session back to transaction for status polling
-                            await provClient.query(
-                                `UPDATE transactions SET provisioned_session_key = $1 WHERE id = $2`,
-                                [sessionKey, transaction.id]
-                            );
-
-                            await provClient.query('COMMIT');
-                            console.log(`✅ Auto-provisioned WiFi: user ${userId}, ${pkg.hours}h`);
-
-                            // Add Mikrotik user outside DB transaction
-                            try {
-                                await mikrotik.addUser(username, password);
-                            } catch (sshErr) {
-                                console.error(`❌ Mikrotik SSH failed for auto-provision ${username}:`, sshErr.message);
-                            }
-                        }
-                    } catch (provErr) {
-                        await provClient.query('ROLLBACK');
-                        console.error('❌ Auto-provision DB error:', provErr.message);
-                    } finally {
-                        provClient.release();
-                    }
-                }
-            } catch (provErr) {
-                console.error('❌ Auto-provision error:', provErr.message);
-            }
-        }
-
-        client.release();
-
+        await processMpesaCallback(Body.stkCallback);
     } catch (error) {
-        console.error('❌ Callback processing error:', error);
+        log.error({ err: error }, '❌ Callback processing error');
     }
 });
+
+/**
+ * Shared callback processor — also used by the MOCK_MPESA simulator.
+ * Idempotent: only 'pending' transactions are credited.
+ */
+async function processMpesaCallback(stkCallback) {
+    const { CheckoutRequestID, ResultCode, ResultDesc } = stkCallback;
+
+    log.info({ checkoutRequestId: CheckoutRequestID, resultCode: ResultCode }, '📞 M-Pesa callback received');
+
+    if (ResultCode !== 0) {
+        log.info({ checkoutRequestId: CheckoutRequestID, resultDesc: ResultDesc }, '⚠️ Payment failed or cancelled');
+        // Mark the transaction as failed
+        await pool.query(
+            `UPDATE transactions SET status = 'failed' WHERE checkout_request_id = $1`,
+            [CheckoutRequestID]
+        );
+        return;
+    }
+
+    // Re-verify with M-Pesa before crediting (prevents spoofed callbacks)
+    let verifyResult;
+    try {
+        verifyResult = await mpesaService.queryTransaction(CheckoutRequestID);
+        if (verifyResult.ResultCode !== '0') {
+            log.warn({ checkoutRequestId: CheckoutRequestID }, '⚠️ Callback verification failed');
+            return;
+        }
+    } catch (verifyErr) {
+        log.error({ err: verifyErr.message }, '❌ Verification query failed, aborting credit');
+        return;
+    }
+
+    // Extract amount and payer phone from callback metadata
+    let amount = 0;
+    let msisdn = '';
+    if (stkCallback.CallbackMetadata?.Item) {
+        stkCallback.CallbackMetadata.Item.forEach(item => {
+            if (item.Name === 'Amount') amount = parseFloat(item.Value);
+            if (item.Name === 'PhoneNumber') msisdn = String(item.Value);
+        });
+    }
+
+    if (amount <= 0) {
+        log.warn('⚠️ Invalid amount in callback, skipping credit');
+        return;
+    }
+
+    // Look up the transaction by exact CheckoutRequestID (not a fuzzy LIKE)
+    const transResult = await pool.query(
+        `SELECT id, user_id, status, package_id FROM transactions
+         WHERE checkout_request_id = $1 LIMIT 1`,
+        [CheckoutRequestID]
+    );
+
+    if (transResult.rows.length === 0) {
+        log.warn({ checkoutRequestId: CheckoutRequestID }, '⚠️ No transaction found for callback');
+        return;
+    }
+
+    const transaction = transResult.rows[0];
+
+    // Idempotency guard — do not process twice
+    if (transaction.status !== 'pending') {
+        log.info({ checkoutRequestId: CheckoutRequestID, status: transaction.status }, 'ℹ️ Transaction already processed');
+        return;
+    }
+
+    const userId = transaction.user_id;
+
+    // Update transaction and user balance atomically.
+    // try/finally guarantees the pool client is always released.
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+
+        await client.query(
+            `UPDATE transactions SET status = 'success' WHERE id = $1`,
+            [transaction.id]
+        );
+
+        await client.query(
+            `UPDATE users SET account_balance = account_balance + $1 WHERE id = $2`,
+            [amount, userId]
+        );
+
+        await client.query('COMMIT');
+        log.info({ amount, userId }, '✅ Payment confirmed — balance credited');
+    } catch (dbErr) {
+        await client.query('ROLLBACK');
+        log.error({ err: dbErr.message }, '❌ DB error crediting balance, rolled back');
+        return;
+    } finally {
+        client.release();
+    }
+
+    // Auto-provision WiFi if this payment was for a specific package (portal flow)
+    if (transaction.package_id) {
+        try {
+            const pkgResult = await pool.query(
+                'SELECT * FROM pricing WHERE id = $1',
+                [transaction.package_id]
+            );
+
+            if (pkgResult.rows.length > 0) {
+                const pkg = pkgResult.rows[0];
+                const { username, password, sessionKey } = createWifiCredentials(userId);
+
+                const provClient = await pool.connect();
+                let provisioned = false;
+                try {
+                    await provClient.query('BEGIN');
+
+                    // Deduct balance (atomic guard)
+                    const deduct = await provClient.query(
+                        `UPDATE users SET account_balance = account_balance - $1
+                         WHERE id = $2 AND account_balance >= $1
+                         RETURNING account_balance`,
+                        [pkg.price, userId]
+                    );
+
+                    if (deduct.rowCount === 0) {
+                        await provClient.query('ROLLBACK');
+                        log.warn({ userId }, '⚠️ Insufficient balance to auto-provision');
+                    } else {
+                        // Create session (password stored encrypted at rest)
+                        const sessionResult = await provClient.query(
+                            `INSERT INTO sessions
+                               (user_id, session_key, mikrotik_username, mikrotik_password, start_time, duration_hours, cost_amount, status)
+                             VALUES ($1, $2, $3, $4, NOW(), $5, $6, 'active')
+                             RETURNING id`,
+                            [userId, sessionKey, username, encryptSecret(password), pkg.hours, pkg.price]
+                        );
+
+                        // Link session back to transaction for status polling
+                        await provClient.query(
+                            `UPDATE transactions SET provisioned_session_key = $1 WHERE id = $2`,
+                            [sessionKey, transaction.id]
+                        );
+
+                        await provClient.query('COMMIT');
+                        provisioned = true;
+                        log.info({ userId, hours: pkg.hours }, '✅ Auto-provisioned WiFi session');
+                    }
+                } catch (provErr) {
+                    await provClient.query('ROLLBACK');
+                    log.error({ err: provErr.message }, '❌ Auto-provision DB error');
+                } finally {
+                    provClient.release();
+                }
+
+                if (provisioned) {
+                    // Add Mikrotik user outside the DB transaction;
+                    // the reconciliation cron retries if this fails.
+                    try {
+                        await mikrotik.addUser(username, password);
+                        await pool.query(
+                            `UPDATE sessions SET router_provisioned = TRUE WHERE session_key = $1`,
+                            [sessionKey]
+                        );
+                    } catch (sshErr) {
+                        log.error({ err: sshErr.message, username }, '❌ Mikrotik SSH failed for auto-provision — reconciliation will retry');
+                    }
+
+                    // Notify the customer (fire and forget)
+                    if (!msisdn) {
+                        const userResult = await pool.query(
+                            'SELECT phone_number FROM users WHERE id = $1',
+                            [userId]
+                        );
+                        msisdn = userResult.rows[0]?.phone_number || '';
+                    }
+                    sms.send(
+                        msisdn,
+                        `Your ${pkg.description} WiFi package (${pkg.hours}h) is active. Username: ${username} Password: ${password}`
+                    ).catch(() => {});
+                }
+            }
+        } catch (provErr) {
+            log.error({ err: provErr.message }, '❌ Auto-provision error');
+        }
+    }
+}
 
 /**
  * GET /api/pricing
@@ -625,10 +877,12 @@ app.post('/mpesa/callback', async (req, res) => {
  */
 app.get('/api/pricing', async (req, res) => {
     try {
-        const result = await pool.query('SELECT * FROM pricing ORDER BY hours ASC');
+        const result = await pool.query(
+            'SELECT id, hours, price, description FROM pricing WHERE is_active = TRUE ORDER BY hours ASC'
+        );
         res.json(result.rows);
     } catch (error) {
-        console.error('❌ Pricing Error:', error);
+        log.error({ err: error }, '❌ Pricing Error');
         return sendError(res, 500, 'Server error', error);
     }
 });
@@ -692,33 +946,46 @@ app.post('/api/wifi/buy', authMiddleware, async (req, res) => {
         }
 
         // Generate Mikrotik credentials
-        const username = `wf_${req.userId}_${Date.now()}`.substring(0, 20);
-        const password = uuidv4().substring(0, 12);
-        const sessionKey = uuidv4().substring(0, 16);
+        const { username, password, sessionKey } = createWifiCredentials(req.userId);
 
-        // Record session
+        // Record session — password stored AES-256-GCM encrypted at rest
         const sessionResult = await client.query(
             `INSERT INTO sessions
                (user_id, session_key, mikrotik_username, mikrotik_password, start_time, duration_hours, cost_amount, status)
              VALUES ($1, $2, $3, $4, NOW(), $5, $6, 'active')
-             RETURNING *`,
-            [req.userId, sessionKey, username, password, pkg.hours, pkg.price]
+             RETURNING id`,
+            [req.userId, sessionKey, username, encryptSecret(password), pkg.hours, pkg.price]
         );
+        const sessionId = sessionResult.rows[0].id;
 
         await client.query('COMMIT');
 
         // Add Mikrotik user AFTER DB commit (so rollback isn't needed if SSH fails)
+        let routerProvisioned = false;
         try {
             await mikrotik.addUser(username, password);
+            routerProvisioned = true;
         } catch (sshErr) {
             // DB is already committed — log prominently but don't fail the API call.
-            // A separate reconciliation job can retry the SSH operation.
-            console.error(`❌ Mikrotik SSH failed for ${username}:`, sshErr.message);
-            console.error('   User session recorded in DB but router not updated. Manual fix required.');
+            // The reconciliation cron job retries the SSH operation every 5 minutes.
+            log.error({ err: sshErr.message, username }, '❌ Mikrotik SSH failed — session recorded in DB but router not updated, reconciliation will retry');
+        }
+
+        if (routerProvisioned) {
+            await pool.query(
+                `UPDATE sessions SET router_provisioned = TRUE WHERE id = $1`,
+                [sessionId]
+            ).catch((error) => log.error({ err: error.message }, 'Failed to mark session router_provisioned'));
         }
 
         const expiry = new Date(Date.now() + pkg.hours * 60 * 60 * 1000);
-        console.log(`✅ WiFi Access Granted: ${req.userPhone} for ${pkg.hours}h (expires ${expiry.toISOString()})`);
+        log.info({ phone: req.userPhone, hours: pkg.hours, expiry: expiry.toISOString() }, '✅ WiFi access granted');
+
+        // Notify the customer with their credentials (fire and forget)
+        sms.send(
+            req.userPhone,
+            `WiFi access granted: ${pkg.hours} hour(s). Username: ${username} Password: ${password}. Valid until ${expiry.toLocaleString('en-KE')}.`
+        ).catch(() => {});
 
         res.json({
             success: true,
@@ -728,12 +995,12 @@ app.post('/api/wifi/buy', authMiddleware, async (req, res) => {
             duration_hours: pkg.hours,
             expiry,
             message: `WiFi access granted for ${pkg.hours} hour(s)`,
-            instructions: 'Connect to the WiFi network and use the credentials above'
+            instructions: 'Connect to the WiFi network and use the credentials above. Credentials were also sent by SMS.'
         });
 
     } catch (error) {
         await client.query('ROLLBACK');
-        console.error('❌ WiFi Buy Error:', error);
+        log.error({ err: error }, '❌ WiFi Buy Error');
         return sendError(res, 500, 'Purchase failed', error);
     } finally {
         client.release();
@@ -758,7 +1025,7 @@ app.get('/api/sessions/active', authMiddleware, async (req, res) => {
 
         res.json(result.rows);
     } catch (error) {
-        console.error('❌ Session Error:', error);
+        log.error({ err: error }, '❌ Session Error:');
         return sendError(res, 500, 'Server error', error);
     }
 });
@@ -778,7 +1045,7 @@ app.get('/api/sessions/history', authMiddleware, async (req, res) => {
 
         res.json(result.rows);
     } catch (error) {
-        console.error('❌ History Error:', error);
+        log.error({ err: error }, '❌ History Error:');
         return sendError(res, 500, 'Server error', error);
     }
 });
@@ -799,7 +1066,7 @@ app.get('/api/transactions/history', authMiddleware, async (req, res) => {
 
         res.json(result.rows);
     } catch (error) {
-        console.error('❌ Transaction Error:', error);
+        log.error({ err: error }, '❌ Transaction Error:');
         return sendError(res, 500, 'Server error', error);
     }
 });
@@ -877,7 +1144,7 @@ app.post('/api/portal/pay', paymentLimiter, async (req, res) => {
             [stkResponse.CheckoutRequestID, internalRef]
         );
 
-        console.log(`📱 Portal pay: ${phone_number} → ${pkg.description} (KES ${pkg.price})`);
+        log.info(`📱 Portal pay: ${phone_number} → ${pkg.description} (KES ${pkg.price})`);
 
         res.json({
             success: true,
@@ -891,7 +1158,7 @@ app.post('/api/portal/pay', paymentLimiter, async (req, res) => {
         });
 
     } catch (error) {
-        console.error('❌ Portal Pay Error:', error);
+        log.error({ err: error }, '❌ Portal Pay Error:');
         return sendError(res, 500, 'Payment request failed. Please try again.', error);
     }
 });
@@ -946,7 +1213,7 @@ app.get('/api/portal/status/:checkoutRequestId', async (req, res) => {
                 status: 'success',
                 credentials: {
                     username: tx.username,
-                    password: tx.password,
+                    password: decryptSecret(tx.password),
                     duration_hours: tx.duration_hours,
                     expiry: tx.expiry,
                     package_name: tx.package_name
@@ -958,7 +1225,7 @@ app.get('/api/portal/status/:checkoutRequestId', async (req, res) => {
         return res.json({ status: 'provisioning', message: 'Payment received! Setting up your access...' });
 
     } catch (error) {
-        console.error('❌ Portal Status Error:', error);
+        log.error({ err: error }, '❌ Portal Status Error:');
         return sendError(res, 500, 'Could not check status', error);
     }
 });
@@ -1028,7 +1295,7 @@ const sendAdminList = (res, rows, total, options) => {
  * Get system statistics.
  * Requires X-Admin-Key header matching ADMIN_API_KEY in .env
  */
-app.get('/admin/stats', adminMiddleware, async (req, res) => {
+app.get('/admin/stats', ...adminGuard, async (req, res) => {
     try {
         const [usersResult, transactionsResult, activeResult] = await Promise.all([
             pool.query(
@@ -1071,7 +1338,7 @@ app.get('/admin/stats', adminMiddleware, async (req, res) => {
             active_sessions: parseInt(activeResult.rows[0].count, 10)
         });
     } catch (error) {
-        console.error('❌ Stats Error:', error);
+        log.error({ err: error }, '❌ Stats Error:');
         return sendError(res, 500, 'Server error', error);
     }
 });
@@ -1080,7 +1347,7 @@ app.get('/admin/stats', adminMiddleware, async (req, res) => {
  * GET /admin/analytics?days=30
  * Returns daily successful revenue/transaction totals and new user counts.
  */
-app.get('/admin/analytics', adminMiddleware, async (req, res) => {
+app.get('/admin/analytics', ...adminGuard, async (req, res) => {
     const daysParam = req.query.days === undefined ? '30' : req.query.days;
     if (typeof daysParam !== 'string' || !/^\d+$/.test(daysParam) ||
         !Number.isInteger(Number(daysParam)) || Number(daysParam) < 1 || Number(daysParam) > 90) {
@@ -1125,7 +1392,7 @@ app.get('/admin/analytics', adminMiddleware, async (req, res) => {
 
         res.json({ days, data: result.rows });
     } catch (error) {
-        console.error('❌ Admin Analytics Error:', error);
+        log.error({ err: error }, '❌ Admin Analytics Error:');
         return sendError(res, 500, 'Server error', error);
     }
 });
@@ -1133,7 +1400,7 @@ app.get('/admin/analytics', adminMiddleware, async (req, res) => {
 /**
  * GET /admin/users?search=&status=&page=1&limit=25
  */
-app.get('/admin/users', adminMiddleware, async (req, res) => {
+app.get('/admin/users', ...adminGuard, async (req, res) => {
     const options = getAdminListOptions(req, res);
     if (!options) return;
 
@@ -1165,7 +1432,7 @@ app.get('/admin/users', adminMiddleware, async (req, res) => {
 
         sendAdminList(res, usersResult.rows, parseInt(countResult.rows[0].count, 10), options);
     } catch (error) {
-        console.error('❌ Admin Users Error:', error);
+        log.error({ err: error }, '❌ Admin Users Error:');
         return sendError(res, 500, 'Server error', error);
     }
 });
@@ -1174,7 +1441,7 @@ app.get('/admin/users', adminMiddleware, async (req, res) => {
  * GET /admin/sessions?search=&status=&page=1&limit=25
  * Deliberately excludes Mikrotik passwords and session keys.
  */
-app.get('/admin/sessions', adminMiddleware, async (req, res) => {
+app.get('/admin/sessions', ...adminGuard, async (req, res) => {
     const options = getAdminListOptions(req, res);
     if (!options) return;
 
@@ -1212,7 +1479,7 @@ app.get('/admin/sessions', adminMiddleware, async (req, res) => {
 
         sendAdminList(res, sessionsResult.rows, parseInt(countResult.rows[0].count, 10), options);
     } catch (error) {
-        console.error('❌ Admin Sessions Error:', error);
+        log.error({ err: error }, '❌ Admin Sessions Error:');
         return sendError(res, 500, 'Server error', error);
     }
 });
@@ -1220,7 +1487,7 @@ app.get('/admin/sessions', adminMiddleware, async (req, res) => {
 /**
  * GET /admin/transactions?search=&status=&page=1&limit=25
  */
-app.get('/admin/transactions', adminMiddleware, async (req, res) => {
+app.get('/admin/transactions', ...adminGuard, async (req, res) => {
     const options = getAdminListOptions(req, res);
     if (!options) return;
 
@@ -1249,8 +1516,10 @@ app.get('/admin/transactions', adminMiddleware, async (req, res) => {
             pool.query(
                 `SELECT t.id, t.user_id, u.phone_number, t.mpesa_ref,
                         t.checkout_request_id, t.amount, t.status,
-                        t.package_id, t.created_at
-                 FROM transactions t JOIN users u ON u.id = t.user_id ${where}
+                        t.package_id, p.description AS package_description, t.created_at
+                 FROM transactions t
+                 JOIN users u ON u.id = t.user_id
+                 LEFT JOIN pricing p ON p.id = t.package_id ${where}
                  ORDER BY t.created_at DESC, t.id DESC
                  LIMIT $${listValues.length - 1} OFFSET $${listValues.length}`,
                 listValues
@@ -1259,7 +1528,176 @@ app.get('/admin/transactions', adminMiddleware, async (req, res) => {
 
         sendAdminList(res, transactionsResult.rows, parseInt(countResult.rows[0].count, 10), options);
     } catch (error) {
-        console.error('❌ Admin Transactions Error:', error);
+        log.error({ err: error }, '❌ Admin Transactions Error');
+        return sendError(res, 500, 'Server error', error);
+    }
+});
+
+/**
+ * GET /admin/packages
+ * Lists all packages (including inactive) with lifetime sales and revenue.
+ */
+app.get('/admin/packages', ...adminGuard, async (req, res) => {
+    try {
+        const result = await pool.query(
+            `SELECT p.id, p.hours, p.price, p.description, p.is_active,
+                    COUNT(t.id) FILTER (WHERE t.status = 'success')::int AS sales,
+                    COALESCE(SUM(t.amount) FILTER (WHERE t.status = 'success'), 0) AS revenue
+             FROM pricing p
+             LEFT JOIN transactions t ON t.package_id = p.id
+             GROUP BY p.id
+             ORDER BY p.hours ASC`
+        );
+        res.json({ data: result.rows });
+    } catch (error) {
+        log.error({ err: error }, '❌ Admin Packages Error');
+        return sendError(res, 500, 'Server error', error);
+    }
+});
+
+/**
+ * Validates the request body for package create/update.
+ * Returns an error message string, or null if valid.
+ */
+const validatePackageInput = (body, { partial = false } = {}) => {
+    const checks = [];
+
+    if (!partial || body.hours !== undefined) {
+        const hours = Number(body.hours);
+        if (!Number.isInteger(hours) || hours < 1 || hours > 8760) {
+            checks.push('Hours must be an integer between 1 and 8760');
+        }
+    }
+
+    if (!partial || body.price !== undefined) {
+        const price = Number(body.price);
+        if (!Number.isFinite(price) || price < 1 || price > 1_000_000) {
+            checks.push('Price must be a number between 1 and 1,000,000');
+        }
+    }
+
+    if (!partial || body.description !== undefined) {
+        if (typeof body.description !== 'string' || !body.description.trim() || body.description.trim().length > 100) {
+            checks.push('Description is required (max 100 characters)');
+        }
+    }
+
+    return checks.length ? checks.join('; ') : null;
+};
+
+/**
+ * POST /admin/packages
+ * Creates a new WiFi package. Body: { hours, price, description }
+ */
+app.post('/admin/packages', ...adminGuard, async (req, res) => {
+    const { hours, price, description } = req.body || {};
+
+    const validationError = validatePackageInput({ hours, price, description });
+    if (validationError) {
+        return sendError(res, 400, validationError);
+    }
+
+    try {
+        const result = await pool.query(
+            `INSERT INTO pricing (hours, price, description)
+             VALUES ($1, $2, $3)
+             RETURNING id, hours, price, description, is_active`,
+            [Number(hours), Number(price), description.trim()]
+        );
+        log.info({ packageId: result.rows[0].id }, '✅ Package created');
+        res.status(201).json({ success: true, package: result.rows[0] });
+    } catch (error) {
+        if (error.code === '23505') {
+            return sendError(res, 409, 'A package with this duration (hours) already exists');
+        }
+        log.error({ err: error }, '❌ Admin Package Create Error');
+        return sendError(res, 500, 'Server error', error);
+    }
+});
+
+/**
+ * PUT /admin/packages/:id
+ * Updates hours, price, description and/or is_active.
+ * Body: any subset of { hours, price, description, is_active }
+ */
+app.put('/admin/packages/:id', ...adminGuard, async (req, res) => {
+    const { id } = req.params;
+
+    if (!/^\d+$/.test(id)) {
+        return sendError(res, 400, 'Invalid package ID');
+    }
+
+    const body = req.body || {};
+    const allowedFields = ['hours', 'price', 'description', 'is_active'];
+    const updates = allowedFields.filter((field) => body[field] !== undefined);
+
+    if (updates.length === 0) {
+        return sendError(res, 400, 'Provide at least one of: hours, price, description, is_active');
+    }
+
+    if (body.is_active !== undefined && typeof body.is_active !== 'boolean') {
+        return sendError(res, 400, 'is_active must be a boolean');
+    }
+
+    const validationError = validatePackageInput(body, { partial: true });
+    if (validationError) {
+        return sendError(res, 400, validationError);
+    }
+
+    try {
+        const setClauses = updates.map((field, index) => `${field} = $${index + 1}`);
+        const values = updates.map((field) => (
+            field === 'description' ? String(body[field]).trim() : body[field]
+        ));
+        values.push(id);
+
+        const result = await pool.query(
+            `UPDATE pricing SET ${setClauses.join(', ')} WHERE id = $${values.length}
+             RETURNING id, hours, price, description, is_active`,
+            values
+        );
+
+        if (result.rows.length === 0) {
+            return sendError(res, 404, 'Package not found');
+        }
+
+        log.info({ packageId: id, updates }, '✅ Package updated');
+        res.json({ success: true, package: result.rows[0] });
+    } catch (error) {
+        if (error.code === '23505') {
+            return sendError(res, 409, 'A package with this duration (hours) already exists');
+        }
+        log.error({ err: error }, '❌ Admin Package Update Error');
+        return sendError(res, 500, 'Server error', error);
+    }
+});
+
+/**
+ * DELETE /admin/packages/:id
+ * Soft-deletes a package (sets is_active = FALSE). Historical
+ * transactions keep their reference; /api/pricing stops listing it.
+ */
+app.delete('/admin/packages/:id', ...adminGuard, async (req, res) => {
+    const { id } = req.params;
+
+    if (!/^\d+$/.test(id)) {
+        return sendError(res, 400, 'Invalid package ID');
+    }
+
+    try {
+        const result = await pool.query(
+            `UPDATE pricing SET is_active = FALSE WHERE id = $1 RETURNING id`,
+            [id]
+        );
+
+        if (result.rows.length === 0) {
+            return sendError(res, 404, 'Package not found');
+        }
+
+        log.info({ packageId: id }, '✅ Package disabled');
+        res.json({ success: true, id: Number(id), is_active: false });
+    } catch (error) {
+        log.error({ err: error }, '❌ Admin Package Delete Error');
         return sendError(res, 500, 'Server error', error);
     }
 });
@@ -1276,7 +1714,7 @@ app.get('/health', async (req, res) => {
             env: process.env.MPESA_ENV || 'sandbox'
         });
     } catch (err) {
-        console.error('❌ Health check failed:', err.message);
+        log.error({ err: err.message }, '❌ Health check failed:');
         res.status(503).json({
             status: 'ERROR',
             database: 'unreachable',
@@ -1289,18 +1727,18 @@ app.get('/health', async (req, res) => {
 
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
-    console.error('❌ Unhandled Error:', err);
+    log.error({ err: err }, '❌ Unhandled Error:');
     return sendError(res, 500, 'Internal server error', err);
 });
 
-// ============ SESSION EXPIRY CRON JOB ============
+// ============ CRON JOBS ============
 
 /**
  * Runs every minute.
  * Marks sessions as 'expired' when their duration has elapsed,
  * then removes the corresponding user from the Mikrotik router.
  */
-cron.schedule('* * * * *', async () => {
+async function expireSessions() {
     try {
         const expired = await pool.query(
             `UPDATE sessions
@@ -1311,50 +1749,154 @@ cron.schedule('* * * * *', async () => {
         );
 
         if (expired.rowCount > 0) {
-            console.log(`⏰ Expiring ${expired.rowCount} session(s)...`);
+            log.info({ count: expired.rowCount }, '⏰ Expiring sessions');
             for (const session of expired.rows) {
                 if (session.mikrotik_username) {
                     try {
                         await mikrotik.removeUser(session.mikrotik_username);
-                        console.log(`   ✅ Removed Mikrotik user: ${session.mikrotik_username}`);
+                        log.info({ username: session.mikrotik_username }, '   ✅ Removed Mikrotik user');
                     } catch (err) {
-                        console.error(`   ❌ Failed to remove ${session.mikrotik_username}:`, err.message);
+                        log.error({ err: err.message, username: session.mikrotik_username }, '   ❌ Failed to remove Mikrotik user');
                     }
                 }
             }
         }
     } catch (error) {
-        console.error('❌ Session expiry cron error:', error.message);
+        log.error({ err: error.message }, '❌ Session expiry cron error');
     }
-});
+}
+
+/**
+ * Runs every minute.
+ * Sends an SMS ~30 minutes before an active session expires.
+ * Each session is reminded at most once (expiry_reminder_sent flag).
+ */
+async function sendExpiryReminders() {
+    if (!sms.enabled) return;
+    try {
+        const expiring = await pool.query(
+            `SELECT s.id, u.phone_number
+             FROM sessions s
+             JOIN users u ON u.id = s.user_id
+             WHERE s.status = 'active'
+               AND s.expiry_reminder_sent = FALSE
+               AND s.start_time + (s.duration_hours * interval '1 hour') BETWEEN NOW() AND NOW() + INTERVAL '30 minutes'`
+        );
+
+        for (const row of expiring.rows) {
+            const sent = await sms.send(
+                row.phone_number,
+                'Your WiFi session expires in about 30 minutes. Top up or buy a new package to stay connected.'
+            );
+            if (sent) {
+                await pool.query(`UPDATE sessions SET expiry_reminder_sent = TRUE WHERE id = $1`, [row.id]);
+            }
+        }
+    } catch (error) {
+        log.error({ err: error.message }, '❌ Expiry reminder cron error');
+    }
+}
+
+/**
+ * Runs every 5 minutes.
+ * Retries Mikrotik provisioning for active sessions whose router user
+ * creation failed earlier (SSH down, router reboot, etc.), so customers
+ * are not left with paid-but-unusable credentials.
+ * Only recent sessions (last 24h) are retried.
+ */
+async function reconcileUnprovisionedSessions() {
+    try {
+        const pending = await pool.query(
+            `SELECT s.id, s.mikrotik_username, s.mikrotik_password
+             FROM sessions s
+             WHERE s.status = 'active'
+               AND s.router_provisioned = FALSE
+               AND s.start_time > NOW() - INTERVAL '24 hours'`
+        );
+
+        if (pending.rowCount === 0) return;
+
+        log.info({ count: pending.rowCount }, '🔧 Reconciling unprovisioned sessions');
+        for (const session of pending.rows) {
+            const password = decryptSecret(session.mikrotik_password);
+            if (!session.mikrotik_username || !password) {
+                log.error({ sessionId: session.id }, '   ❌ Cannot reconcile — missing credentials');
+                continue;
+            }
+            try {
+                // The router may already hold the user from a partially
+                // successful attempt — clear it first, ignore errors.
+                await mikrotik.removeUser(session.mikrotik_username).catch(() => {});
+                await mikrotik.addUser(session.mikrotik_username, password);
+                await pool.query(`UPDATE sessions SET router_provisioned = TRUE WHERE id = $1`, [session.id]);
+                log.info({ username: session.mikrotik_username }, '   ✅ Router user reconciled');
+            } catch (err) {
+                log.error({ err: err.message, username: session.mikrotik_username }, '   ❌ Reconciliation attempt failed — will retry');
+            }
+        }
+    } catch (error) {
+        log.error({ err: error.message }, '❌ Reconciliation cron error');
+    }
+}
 
 // ============ START SERVER ============
 
-const PORT = process.env.PORT || 3000;
+if (require.main === module) {
+    const cronTasks = [
+        cron.schedule('* * * * *', expireSessions),
+        cron.schedule('* * * * *', sendExpiryReminders),
+        cron.schedule('*/5 * * * *', reconcileUnprovisionedSessions)
+    ];
 
-app.listen(PORT, () => {
-    console.log(`
+    const PORT = process.env.PORT || 3000;
+    const server = app.listen(PORT, () => {
+        log.info(`
 ╔════════════════════════════════════════╗
 ║   WiFi Hotspot Backend Server         ║
 ║   Environment: ${(process.env.MPESA_ENV || 'sandbox').padEnd(22)}║
 ║   Port: ${String(PORT).padEnd(30)}║
-╚════════════════════════════════════════╝
-    `);
-    console.log('📡 Server ready for WiFi hotspot operations');
-    console.log(`🌍 Portal:    http://localhost:${PORT}`);
-    console.log(`💰 M-Pesa:    ${process.env.MPESA_ENV || 'sandbox'}`);
-    console.log(`⏰ Session expiry cron: running every minute`);
-});
+╚════════════════════════════════════════╝`);
+        log.info('📡 Server ready for WiFi hotspot operations');
+        log.info(`🌍 Portal:    http://localhost:${PORT}`);
+        log.info(`💰 M-Pesa:    ${process.env.MPESA_ENV || 'sandbox'}${mpesaService.mock ? ' (MOCKED)' : ''}`);
+        log.info('⏰ Crons: session expiry + reminders every minute, reconciliation every 5 minutes');
+    });
 
-// Graceful shutdown
-process.on('SIGINT', () => {
-    console.log('\n⛔ Shutting down...');
-    pool.end();
-    process.exit(0);
-});
+    // Graceful shutdown: stop crons, stop accepting new requests, drain
+    // in-flight ones, then close the DB pool. A hard timeout force-exits
+    // in case keep-alive sockets never drain.
+    let shuttingDown = false;
+    const shutdown = (signal) => {
+        if (shuttingDown) return;
+        shuttingDown = true;
+        log.info({ signal }, '⛔ Shutting down — stopping cron tasks and closing server');
+        cronTasks.forEach((task) => {
+            try { task?.stop?.(); } catch { /* already stopped */ }
+        });
 
-process.on('SIGTERM', () => {
-    console.log('\n⛔ SIGTERM received, shutting down...');
-    pool.end();
-    process.exit(0);
-});
+        server.close(() => {
+            log.info('HTTP server closed');
+            pool.end().finally(() => process.exit(0));
+        });
+
+        setTimeout(() => {
+            log.warn('Shutdown timeout reached — forcing exit');
+            pool.end().catch(() => {}).finally(() => process.exit(0));
+        }, 10_000).unref();
+    };
+
+    process.on('SIGINT', () => shutdown('SIGINT'));
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
+} else {
+    // Required as a module (test suite): export the app without
+    // starting the listener or cron jobs.
+    module.exports = app;
+    module.exports._internal = {
+        isValidPhone,
+        isIpAllowed,
+        matchesCidr,
+        encryptSecret,
+        decryptSecret,
+        mpesaService
+    };
+}

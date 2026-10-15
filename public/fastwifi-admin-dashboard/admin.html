@@ -20,7 +20,7 @@
         <a class="nav-item active" href="#overview"><span class="nav-icon">▦</span> Overview</a>
         <a class="nav-item" href="#connected"><span class="nav-icon">◉</span> Connected customers <span class="nav-count" id="navConnectedCount">—</span></a>
         <a class="nav-item" href="#payments"><span class="nav-icon">↗</span> Payments</a>
-        <a class="nav-item" href="#packages"><span class="nav-icon">◫</span> WiFi packages</a>
+        <a class="nav-item" href="#packageManager"><span class="nav-icon">◫</span> WiFi packages</a>
       </nav>
       <div class="sidebar-bottom">
         <div class="status-card"><span class="status-dot"></span><div><strong>Network status</strong><small id="networkStatus">Demo mode</small></div></div>
@@ -97,6 +97,26 @@
           <div class="panel-header"><div><h2>Package performance</h2><p class="muted">Sales by WiFi package</p></div><span class="subtle-badge">Top packages</span></div>
           <div id="packageList" class="package-list"></div>
         </article>
+      </section>
+
+      <section class="panel table-panel" id="packageManager">
+        <div class="panel-header table-heading">
+          <div><h2>Manage WiFi packages</h2><p class="muted">Create, edit, enable or disable the packages customers can buy</p></div>
+          <span class="count-pill" id="packageCount">—</span>
+        </div>
+        <form class="package-form" id="packageForm">
+          <input id="pkgName" class="package-input" type="text" placeholder="Name (e.g. 3 Hours)" maxlength="100" required>
+          <input id="pkgHours" class="package-input" type="number" placeholder="Hours" min="1" max="8760" step="1" required>
+          <input id="pkgPrice" class="package-input" type="number" placeholder="Price (KES)" min="1" max="1000000" step="0.01" required>
+          <button type="submit" class="button-primary">+ Add package</button>
+        </form>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Package</th><th>Hours</th><th>Price</th><th>Sales</th><th>Revenue</th><th>Status</th><th>Actions</th></tr></thead>
+            <tbody id="packageTableBody"><tr><td colspan="7" class="empty-cell">Loading packages…</td></tr></tbody>
+          </table>
+        </div>
+        <div class="table-footer"><span id="packageFooter">Packages shown on the customer portal immediately</span><span class="muted">Deleting keeps purchase history intact</span></div>
       </section>
 
       <section class="panel table-panel" id="connected">

@@ -29,7 +29,10 @@ CREATE TABLE IF NOT EXISTS pricing (
     id           SERIAL PRIMARY KEY,
     hours        INT NOT NULL UNIQUE,
     price        DECIMAL(10,2) NOT NULL,
-    description  VARCHAR(100) NOT NULL
+    description  VARCHAR(100) NOT NULL,
+    -- Soft-delete flag: inactive packages are hidden from /api/pricing
+    -- but kept so historical transactions still reference them
+    is_active    BOOLEAN NOT NULL DEFAULT TRUE
 );
 
 -- Default pricing packages
@@ -54,9 +57,10 @@ CREATE TABLE IF NOT EXISTS sessions (
     session_key        VARCHAR(100) UNIQUE,
 
     -- Credentials stored so the portal status endpoint
-    -- can return them after payment
+    -- can return them after payment.
+    -- mikrotik_password is stored AES-256-GCM encrypted (prefix 'enc:v1:')
     mikrotik_username  VARCHAR(50),
-    mikrotik_password  VARCHAR(50),
+    mikrotik_password  VARCHAR(255),
 
     ip_address         VARCHAR(15),
 
@@ -68,7 +72,14 @@ CREATE TABLE IF NOT EXISTS sessions (
 
     cost_amount        DECIMAL(10,2),
 
-    status             VARCHAR(20) NOT NULL DEFAULT 'active'
+    status             VARCHAR(20) NOT NULL DEFAULT 'active',
+
+    -- Set to TRUE once the user was confirmed created on the Mikrotik router.
+    -- FALSE rows are retried by the reconciliation cron job.
+    router_provisioned BOOLEAN NOT NULL DEFAULT FALSE,
+
+    -- Set to TRUE once the "expiring soon" SMS reminder has been sent
+    expiry_reminder_sent BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 CREATE INDEX IF NOT EXISTS idx_session_user
@@ -121,3 +132,36 @@ CREATE INDEX IF NOT EXISTS idx_transaction_package
 
 CREATE INDEX IF NOT EXISTS idx_transaction_status
     ON transactions(status);
+
+
+-- ============================================================
+-- ADMIN AUDIT LOG
+-- One row per admin API request (method, path, source IP,
+-- response status). Written by the auditAdmin middleware.
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS admin_audit_log (
+    id           SERIAL PRIMARY KEY,
+    ip           VARCHAR(45),
+    method       VARCHAR(10) NOT NULL,
+    path         VARCHAR(200) NOT NULL,
+    status_code  INT,
+    duration_ms  INT,
+    created_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_created
+    ON admin_audit_log(created_at);
+
+
+-- ============================================================
+-- MIGRATIONS (idempotent — safe to re-run on existing databases)
+-- Brings older deployments up to the current shape.
+-- ============================================================
+
+-- Encrypted credentials are longer than the original 50 chars
+ALTER TABLE sessions ALTER COLUMN mikrotik_password TYPE VARCHAR(255);
+
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS router_provisioned BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS expiry_reminder_sent BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE pricing ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE;

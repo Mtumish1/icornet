@@ -10,7 +10,8 @@
     stats: '/admin/stats',
     analytics: '/admin/analytics',
     sessions: '/admin/sessions?status=active&page=1&limit=100',
-    payments: '/admin/transactions?page=1&limit=100'
+    payments: '/admin/transactions?page=1&limit=100',
+    packages: '/admin/packages'
   };
 
   const demo = {
@@ -51,7 +52,7 @@
     ]
   };
 
-  const state = { overview: demo.overview, sessions: demo.sessions, payments: demo.payments, analytics: [], demoMode: true, period: 'today', showAllPayments: false, paymentTotal: demo.payments.length, sessionTotal: demo.sessions.length };
+  const state = { overview: demo.overview, sessions: demo.sessions, payments: demo.payments, packages: [], analytics: [], demoMode: true, period: 'today', showAllPayments: false, paymentTotal: demo.payments.length, sessionTotal: demo.sessions.length };
   const $ = (id) => document.getElementById(id);
   const kes = (value) => `KES ${Number(value || 0).toLocaleString('en-KE', { maximumFractionDigits: 0 })}`;
   const safe = (value) => String(value ?? '—').replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
@@ -65,6 +66,22 @@
       throw error;
     }
     return response.json();
+  }
+
+  async function sendJson(url, method, body, adminKey) {
+    const response = await fetch(url, {
+      method,
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json', 'X-Admin-Key': adminKey },
+      body: JSON.stringify(body)
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const error = new Error(data.error || `${url} returned HTTP ${response.status}`);
+      error.status = response.status;
+      throw error;
+    }
+    return data;
   }
 
   function adminKey() {
@@ -107,7 +124,7 @@
       reference: transaction.mpesa_ref || transaction.checkout_request_id || `#${transaction.id}`,
       name: 'Customer',
       phone: transaction.phone_number,
-      package_name: transaction.package_id ? `Package ${transaction.package_id}` : 'Account top-up',
+      package_name: transaction.package_description || (transaction.package_id ? `Package ${transaction.package_id}` : 'Account top-up'),
       created_at: formatDate(transaction.created_at)
     };
   }
@@ -117,7 +134,8 @@
       getJson(ENDPOINTS.stats, key),
       getJson('/admin/analytics?days=90', key),
       getJson(ENDPOINTS.sessions, key),
-      getJson(ENDPOINTS.payments, key)
+      getJson(ENDPOINTS.payments, key),
+      getJson(ENDPOINTS.packages, key)
     ]);
     const authFailure = results.find(result => result.status === 'rejected' && [401, 403].includes(result.reason.status));
     if (authFailure) throw authFailure.reason;
@@ -153,6 +171,9 @@
         state.payments = (results[3].value.data || []).map(mapTransaction);
         state.paymentTotal = results[3].value.pagination?.total ?? state.payments.length;
       } else { state.payments = []; state.paymentTotal = 0; }
+      if (results[4].status === 'fulfilled') {
+        state.packages = results[4].value.data || [];
+      } else { state.packages = []; }
     }
   }
 
@@ -195,6 +216,7 @@
     renderMetrics();
     renderChart();
     renderPackages();
+    renderPackageTable();
     renderSessions();
     renderPayments();
     $('demoBanner').classList.toggle('hidden', !state.demoMode);
@@ -249,7 +271,12 @@
   }
 
   function renderPackages() {
-    const packages = Array.isArray(state.overview?.packages) ? state.overview.packages : [];
+    let packages = [];
+    if (!state.demoMode && state.packages.length) {
+      packages = state.packages.map(p => ({ name: p.description, sales: Number(p.sales || 0), revenue: Number(p.revenue || 0) }));
+    } else if (state.demoMode) {
+      packages = state.overview?.packages || demo.overview.packages;
+    }
     if (!packages.length) {
       $('packageList').innerHTML = '<p class="empty-cell">No package performance data available.</p>';
       return;
@@ -259,6 +286,38 @@
       const measure = Number(p.revenue || p.sales || 0);
       const salesText = `${Number(p.sales || 0).toLocaleString()} sales`;
       return `<div class="package-row"><div><div class="package-name">${safe(p.name || p.package_name || 'WiFi package')}</div><div class="package-sales">${salesText}</div></div><div class="package-price">${kes(p.revenue || 0)}</div><div class="package-progress"><span style="width:${Math.max(3, measure / max * 100)}%"></span></div></div>`;
+    }).join('');
+  }
+
+  function renderPackageTable() {
+    const packages = state.packages;
+    $('packageCount').textContent = state.demoMode ? 'Demo data' : `${packages.length} package${packages.length === 1 ? '' : 's'}`;
+    if (state.demoMode) {
+      $('packageTableBody').innerHTML = '<tr><td colspan="7" class="empty-cell">Connect the admin API (enter your admin key) to manage packages.</td></tr>';
+      $('packageFooter').textContent = 'Package management requires a live API connection';
+      return;
+    }
+    if (!packages.length) {
+      $('packageTableBody').innerHTML = '<tr><td colspan="7" class="empty-cell">No packages yet — add your first one above.</td></tr>';
+      return;
+    }
+    $('packageFooter').textContent = `Showing all ${packages.length} package${packages.length === 1 ? '' : 's'}`;
+    $('packageTableBody').innerHTML = packages.map(p => {
+      const active = p.is_active !== false;
+      const statusClass = active ? 'online' : 'expired';
+      const statusLabel = active ? 'Active' : 'Disabled';
+      return `<tr>
+        <td><div class="customer-name">${safe(p.description)}</div></td>
+        <td>${Number(p.hours)}h</td>
+        <td class="amount">${kes(p.price)}</td>
+        <td>${Number(p.sales || 0).toLocaleString()}</td>
+        <td>${kes(p.revenue || 0)}</td>
+        <td><span class="status-badge ${statusClass}">${statusLabel}</span></td>
+        <td class="package-actions">
+          <button class="mini-button" data-action="edit" data-id="${p.id}" type="button">Edit</button>
+          <button class="mini-button ${active ? '' : 'primary'}" data-action="toggle" data-id="${p.id}" type="button">${active ? 'Disable' : 'Enable'}</button>
+        </td>
+      </tr>`;
     }).join('');
   }
 
@@ -335,6 +394,61 @@
     $('exportButton').addEventListener('click', exportCsv);
     $('periodSelect').addEventListener('change', event => { state.period = event.target.value; renderMetrics(); renderChart(); });
     $('customerSearch').addEventListener('input', renderSessions);
+
+    $('packageForm').addEventListener('submit', async event => {
+      event.preventDefault();
+      const key = adminKey();
+      if (!key) { toast('Enter the admin key first.'); return; }
+      const payload = {
+        description: $('pkgName').value.trim(),
+        hours: Number($('pkgHours').value),
+        price: Number($('pkgPrice').value)
+      };
+      try {
+        await sendJson('/admin/packages', 'POST', payload, key);
+        event.target.reset();
+        toast(`Package "${payload.description}" added.`);
+        await refreshDashboard();
+      } catch (error) {
+        toast(`Could not add package: ${error.message}`);
+      }
+    });
+
+    $('packageTableBody').addEventListener('click', async event => {
+      const button = event.target.closest('button[data-action]');
+      if (!button) return;
+      const key = adminKey();
+      if (!key) { toast('Enter the admin key first.'); return; }
+      const id = button.dataset.id;
+      const pkg = state.packages.find(p => String(p.id) === String(id));
+      button.disabled = true;
+      try {
+        if (button.dataset.action === 'toggle') {
+          await sendJson(`/admin/packages/${id}`, 'PUT', { is_active: pkg?.is_active === false }, key);
+          toast(`Package ${pkg?.is_active === false ? 'enabled' : 'disabled'}.`);
+        } else if (button.dataset.action === 'edit') {
+          const price = window.prompt(`New price in KES for "${pkg?.description}"`, pkg?.price ?? '');
+          if (price === null) return;
+          const hours = window.prompt('Duration in hours', pkg?.hours ?? '');
+          if (hours === null) return;
+          const description = window.prompt('Package name', pkg?.description ?? '');
+          if (description === null) return;
+          const body = {};
+          if (price !== '') body.price = Number(price);
+          if (hours !== '') body.hours = Number(hours);
+          if (description.trim() !== '') body.description = description.trim();
+          if (!Object.keys(body).length) return;
+          await sendJson(`/admin/packages/${id}`, 'PUT', body, key);
+          toast('Package updated.');
+        }
+        await refreshDashboard();
+      } catch (error) {
+        toast(`Update failed: ${error.message}`);
+      } finally {
+        button.disabled = false;
+      }
+    });
+
     $('menuButton').addEventListener('click', () => {
       const open = $('sidebar').classList.toggle('open');
       $('menuButton').setAttribute('aria-expanded', String(open));
